@@ -4,7 +4,7 @@
 
 - **Repository**: `Kubernetes-Security-Posture-Management`
 - **Scanner file**: `kspm_scanner.py`
-- **Version**: 1.4.0
+- **Version**: 1.5.0
 - **Language**: Python 3.8+
 - **Dependency**: `kubernetes` (Python client for Kubernetes API)
 - **Type**: Agentless live-cluster scanner — queries the Kubernetes API via kubeconfig or in-cluster config
@@ -85,6 +85,8 @@ Format: `K8S-{CATEGORY}-{NNN}`
 - **Console**: ANSI color-coded, sorted by severity → category → rule_id
 - **JSON**: `scanner`, `version`, `generated`, `cluster`, `findings_count`, `summary`, `findings[]`
 - **HTML**: Dark theme (Catppuccin palette), Kubernetes blue gradient (#326ce5), JS filter/search
+- **SARIF**: v2.1.0 format for GitHub Security tab (`--sarif`)
+- **PDF**: Professional report with executive summary (`--pdf`); uses reportlab if available, stdlib fallback otherwise
 
 ## Development Guidelines
 
@@ -170,12 +172,12 @@ python kspm_scanner.py --context kind-kind
 - [x] **Admission policy check**: Verify image verification webhook exists (K8S-SC-010)
 - [x] **Tool availability checks**: Detect missing Trivy/Grype/cosign/Syft (K8S-SC-001/002/003)
 
-### v1.5.0 — Multi-Cluster & Reporting
-- [ ] **Multi-cluster scanning**: Scan multiple contexts in a single run
-- [ ] **Diff/trend reporting**: Compare findings between scan runs (JSON diff)
-- [ ] **PDF report generation**: Professional PDF output with executive summary
-- [ ] **Slack/Teams notifications**: Webhook integration for CI/CD alerts
-- [ ] **SARIF output**: Static Analysis Results Interchange Format for GitHub Security tab
+### v1.5.0 — Multi-Cluster & Reporting (COMPLETE)
+- [x] **Multi-cluster scanning**: `--contexts ctx1,ctx2,...` scans multiple clusters, consolidated summary, per-cluster reports
+- [x] **Diff/trend reporting**: `--diff PREV.json` compares findings between runs, shows new/resolved/persistent with severity deltas
+- [x] **PDF report generation**: `--pdf FILE` with reportlab (professional layout) or stdlib fallback (text-based PDF)
+- [x] **Slack/Teams notifications**: `--slack-webhook URL`, `--teams-webhook URL` with severity summary and top findings
+- [x] **SARIF output**: `--sarif FILE` in SARIF v2.1.0 format with rule definitions, CWE tags, compliance properties
 
 ### v2.0.0 — Policy Engine
 - [ ] **Custom policy DSL**: YAML-based custom check definitions

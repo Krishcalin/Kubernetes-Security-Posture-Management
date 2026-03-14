@@ -13,15 +13,18 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 ## Features
 
 - **~140+ security checks** across 18 check groups
+- **Multi-cluster scanning** — scan multiple contexts in a single run (`--contexts`)
 - **Supply chain & image security** — Trivy/Grype CVE scanning, cosign signature verification, SBOM generation, EOL base image detection
 - **Advanced RBAC analysis** — graph-based escalation paths, dormant SAs, permission drift tracking
 - **RBAC baseline drift** — save & compare RBAC state across scans (`--baseline-save`/`--baseline-compare`)
+- **Diff/trend reporting** — compare findings between scan runs (`--diff PREV.json`)
 - **6 compliance frameworks** — CIS Benchmark, NSA/CISA, MITRE ATT&CK, SOC 2, PCI-DSS, NIST 800-190
 - **Compliance dashboard** — per-framework coverage metrics in HTML report
 - **Agentless** — connects via kubeconfig or in-cluster config
 - **All workload types** — Deployments, StatefulSets, DaemonSets, Jobs, CronJobs
 - **Managed cluster support** — graceful handling for EKS, GKE, AKS where API server pods aren't visible
-- **Triple output** — colored console, JSON, interactive HTML (dark theme with JS filtering)
+- **5 output formats** — colored console, JSON, interactive HTML, SARIF (GitHub Security), PDF
+- **Webhook notifications** — Slack & Microsoft Teams CI/CD alerts (`--slack-webhook`, `--teams-webhook`)
 - **Exit codes** — returns `1` if CRITICAL or HIGH findings, `0` otherwise (CI/CD friendly)
 
 ---
@@ -148,31 +151,56 @@ python kspm_scanner.py --trusted-registries "harbor.corp.io,ecr.us-east-1.amazon
 
 # Specify custom Trivy path
 python kspm_scanner.py --trivy-path /usr/local/bin/trivy --html report.html
+
+# Multi-cluster scanning (v1.5.0)
+python kspm_scanner.py --contexts dev-cluster,staging-cluster,prod-cluster --json reports/ --html reports/
+
+# SARIF output for GitHub Security tab
+python kspm_scanner.py --sarif results.sarif
+
+# PDF report with executive summary
+python kspm_scanner.py --pdf report.pdf
+
+# Diff/trend reporting (compare against previous scan)
+python kspm_scanner.py --json current.json --diff previous.json --diff-output diff.json
+
+# Slack/Teams CI/CD notifications
+python kspm_scanner.py --slack-webhook https://hooks.slack.com/services/T.../B.../xxx
+python kspm_scanner.py --teams-webhook https://outlook.office.com/webhook/...
 ```
 
 ### CLI Reference
 
 ```
 usage: kspm_scanner.py [-h] [--kubeconfig FILE] [--context CTX]
-                       [--namespace NS] [--all-namespaces]
+                       [--contexts CTX1,CTX2,...] [--namespace NS]
                        [--severity {CRITICAL,HIGH,MEDIUM,LOW}]
-                       [--json FILE] [--html FILE]
+                       [--json FILE] [--html FILE] [--sarif FILE]
+                       [--pdf FILE] [--diff PREV_JSON] [--diff-output FILE]
                        [--baseline-save FILE] [--baseline-compare FILE]
                        [--trusted-registries LIST] [--trivy-path PATH]
+                       [--slack-webhook URL] [--teams-webhook URL]
                        [--verbose] [--version]
 
 Options:
   --kubeconfig, -k FILE       Path to kubeconfig file (env: KUBECONFIG)
   --context, -c CTX           Kubernetes context to use (env: K8S_CONTEXT)
+  --contexts CTX1,CTX2,...    Scan multiple contexts (comma-separated)
   --namespace, -n NS          Scan specific namespace(s), comma-separated
   --all-namespaces, -A        Scan all namespaces (default)
   --severity LEVEL            Minimum severity to report (default: LOW)
-  --json FILE                 Save JSON report to FILE
-  --html FILE                 Save interactive HTML report to FILE
+  --json FILE                 Save JSON report (or output dir for multi-cluster)
+  --html FILE                 Save HTML report (or output dir for multi-cluster)
+  --sarif FILE                Save SARIF v2.1.0 report for GitHub Security tab
+  --pdf FILE                  Save PDF report with executive summary
+  --diff PREV_JSON            Compare current scan against previous JSON report
+  --diff-output FILE          Save diff report as JSON (requires --diff)
   --baseline-save FILE        Save current RBAC state as baseline
   --baseline-compare FILE     Compare current RBAC against saved baseline
   --trusted-registries LIST   Comma-separated additional trusted registries
   --trivy-path PATH           Path to trivy binary (auto-detected)
+  --slack-webhook URL         Send scan summary to Slack webhook
+  --teams-webhook URL         Send scan summary to Teams webhook
   --verbose, -v               Enable verbose output
   --version                   Show version and exit
 ```

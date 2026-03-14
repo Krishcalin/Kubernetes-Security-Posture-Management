@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 """
-Kubernetes Security Posture Management (KSPM) Scanner  v1.4.0
+Kubernetes Security Posture Management (KSPM) Scanner  v1.5.0
 
 Agentless scanner that connects to a live Kubernetes cluster via the
 Kubernetes API and performs comprehensive security posture checks covering
 RBAC, workload hardening, network security, namespace isolation, secrets
-management, image security, service accounts, cluster configuration,
-persistent volumes, admission control, node security, pod disruption
-budgets, HPA, service mesh, deprecated APIs, runtime classes, and
-CIS Benchmark alignment.
+management, image security, supply chain security, service accounts,
+cluster configuration, persistent volumes, admission control, node security,
+pod disruption budgets, HPA, service mesh, deprecated APIs, runtime classes,
+and CIS Benchmark alignment.
+
+Supports multi-cluster scanning, diff/trend reporting, SARIF output,
+Slack/Teams webhook notifications, and PDF report generation.
 
 Requirements:
     pip install kubernetes
 
 Usage:
     python kspm_scanner.py [--kubeconfig FILE] [--context CTX]
-                           [--namespace NS | --all-namespaces]
+                           [--contexts CTX1,CTX2,...] [--namespace NS]
                            [--severity HIGH] [--json FILE] [--html FILE]
+                           [--sarif FILE] [--pdf FILE]
+                           [--diff FILE] [--slack-webhook URL]
+                           [--teams-webhook URL]
                            [--verbose] [--version]
 """
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 import os, sys, json, re, argparse, html as html_mod, subprocess, shutil
+import hashlib, copy, textwrap
+from io import BytesIO
 from datetime import datetime, timezone
 
 try:
@@ -4035,6 +4043,696 @@ r.style.display=ok?'':'none';
             fh.write(html_content)
         print(f"\n[+] HTML report saved to: {os.path.abspath(path)}")
 
+    # ===================================================================
+    # SARIF Output (v1.5.0) — Static Analysis Results Interchange Format
+    # ===================================================================
+    def save_sarif(self, path: str):
+        """Export findings in SARIF v2.1.0 format for GitHub Security tab."""
+        rules_seen = {}
+        results = []
+        for f in self.findings:
+            if f.rule_id not in rules_seen:
+                refs = self._compliance_refs(f.rule_id)
+                help_text = f"{f.description}\n\nRemediation: {f.recommendation}"
+                if refs:
+                    help_text += "\n\nCompliance: " + ", ".join(
+                        f"{k}: {v}" for k, v in refs.items()
+                    )
+                rule_def = {
+                    "id": f.rule_id,
+                    "name": re.sub(r'[^A-Za-z0-9]', '', f.name.title()),
+                    "shortDescription": {"text": f.name},
+                    "fullDescription": {"text": f.description},
+                    "help": {"text": help_text, "markdown": help_text},
+                    "defaultConfiguration": {
+                        "level": {
+                            "CRITICAL": "error",
+                            "HIGH": "error",
+                            "MEDIUM": "warning",
+                            "LOW": "note",
+                        }.get(f.severity, "note"),
+                    },
+                    "properties": {"tags": [f.category]},
+                }
+                if f.cwe:
+                    cwe_num = re.search(r'\d+', f.cwe)
+                    if cwe_num:
+                        rule_def["properties"]["tags"].append(f"external/cwe/cwe-{cwe_num.group()}")
+                rules_seen[f.rule_id] = rule_def
+
+            result = {
+                "ruleId": f.rule_id,
+                "level": {
+                    "CRITICAL": "error", "HIGH": "error",
+                    "MEDIUM": "warning", "LOW": "note",
+                }.get(f.severity, "note"),
+                "message": {
+                    "text": f"{f.description} — {f.recommendation}",
+                },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": f.file_path.replace("\\", "/"),
+                            "uriBaseId": "%SRCROOT%",
+                        },
+                    },
+                    "logicalLocations": [{
+                        "name": f.file_path,
+                        "kind": "resource",
+                    }],
+                }],
+                "properties": {
+                    "severity": f.severity,
+                    "category": f.category,
+                    "detail": f.line_content or "",
+                },
+            }
+            results.append(result)
+
+        sarif = {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {
+                    "driver": {
+                        "name": "kspm_scanner",
+                        "version": VERSION,
+                        "informationUri": "https://github.com/Krishcalin/Kubernetes-Security-Posture-Management",
+                        "rules": list(rules_seen.values()),
+                    },
+                },
+                "results": results,
+                "invocations": [{
+                    "executionSuccessful": True,
+                    "endTimeUtc": datetime.now(timezone.utc).isoformat(),
+                    "properties": {
+                        "cluster": self.cluster_name,
+                    },
+                }],
+            }],
+        }
+
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(sarif, fh, indent=2)
+        print(f"\n[+] SARIF report saved to: {os.path.abspath(path)}")
+
+    # ===================================================================
+    # Diff / Trend Reporting (v1.5.0)
+    # ===================================================================
+    @staticmethod
+    def diff_reports(current_path: str, previous_path: str, output_path: str = None):
+        """Compare two JSON scan reports and produce a diff report."""
+        with open(previous_path, "r", encoding="utf-8") as fh:
+            prev = json.load(fh)
+        with open(current_path, "r", encoding="utf-8") as fh:
+            curr = json.load(fh)
+
+        def finding_key(f):
+            return f"{f['rule_id']}|{f.get('file_path', '')}|{f.get('line_content', '')}"
+
+        prev_set = {finding_key(f): f for f in prev.get("findings", [])}
+        curr_set = {finding_key(f): f for f in curr.get("findings", [])}
+
+        prev_keys = set(prev_set.keys())
+        curr_keys = set(curr_set.keys())
+
+        new_findings = [curr_set[k] for k in sorted(curr_keys - prev_keys)]
+        resolved_findings = [prev_set[k] for k in sorted(prev_keys - curr_keys)]
+        persistent_findings = [curr_set[k] for k in sorted(curr_keys & prev_keys)]
+
+        prev_summary = prev.get("summary", {})
+        curr_summary = curr.get("summary", {})
+        trend = {}
+        for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            p = prev_summary.get(sev, 0)
+            c = curr_summary.get(sev, 0)
+            trend[sev] = {"previous": p, "current": c, "delta": c - p}
+
+        diff_report = {
+            "scanner": "kspm_scanner",
+            "version": VERSION,
+            "generated": datetime.now(timezone.utc).isoformat(),
+            "diff_type": "scan_comparison",
+            "previous_scan": {
+                "file": os.path.basename(previous_path),
+                "cluster": prev.get("cluster", "unknown"),
+                "generated": prev.get("generated", "unknown"),
+                "total_findings": len(prev.get("findings", [])),
+            },
+            "current_scan": {
+                "file": os.path.basename(current_path),
+                "cluster": curr.get("cluster", "unknown"),
+                "generated": curr.get("generated", "unknown"),
+                "total_findings": len(curr.get("findings", [])),
+            },
+            "trend": trend,
+            "new_findings_count": len(new_findings),
+            "resolved_findings_count": len(resolved_findings),
+            "persistent_findings_count": len(persistent_findings),
+            "new_findings": new_findings,
+            "resolved_findings": resolved_findings,
+        }
+
+        B = "\033[1m"
+        R = "\033[0m"
+        print(f"\n{B}{'=' * 76}{R}")
+        print(f"{B}  KSPM Scanner — Diff / Trend Report{R}")
+        print(f"{'=' * 76}")
+        print(f"  Previous : {os.path.basename(previous_path)} "
+              f"({diff_report['previous_scan']['total_findings']} findings)")
+        print(f"  Current  : {os.path.basename(current_path)} "
+              f"({diff_report['current_scan']['total_findings']} findings)")
+        print(f"{'-' * 76}")
+        print(f"  {'Severity':<12} {'Previous':>10} {'Current':>10} {'Delta':>10}")
+        print(f"  {'-' * 46}")
+        for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            t = trend[sev]
+            delta_str = f"+{t['delta']}" if t['delta'] > 0 else str(t['delta'])
+            print(f"  {sev:<12} {t['previous']:>10} {t['current']:>10} {delta_str:>10}")
+        print(f"{'-' * 76}")
+        print(f"  New findings       : {len(new_findings)}")
+        print(f"  Resolved findings  : {len(resolved_findings)}")
+        print(f"  Persistent findings: {len(persistent_findings)}")
+        print(f"{'=' * 76}")
+
+        if new_findings:
+            print(f"\n{B}  NEW FINDINGS ({len(new_findings)}):{R}")
+            for f in new_findings[:20]:
+                print(f"    [{f.get('severity', '?')}] {f.get('rule_id', '?')}  "
+                      f"{f.get('name', '')}  — {f.get('file_path', '')}")
+            if len(new_findings) > 20:
+                print(f"    ... +{len(new_findings) - 20} more")
+
+        if resolved_findings:
+            print(f"\n{B}  RESOLVED FINDINGS ({len(resolved_findings)}):{R}")
+            for f in resolved_findings[:20]:
+                print(f"    [{f.get('severity', '?')}] {f.get('rule_id', '?')}  "
+                      f"{f.get('name', '')}  — {f.get('file_path', '')}")
+            if len(resolved_findings) > 20:
+                print(f"    ... +{len(resolved_findings) - 20} more")
+
+        if output_path:
+            with open(output_path, "w", encoding="utf-8") as fh:
+                json.dump(diff_report, fh, indent=2)
+            print(f"\n[+] Diff report saved to: {os.path.abspath(output_path)}")
+
+        return diff_report
+
+    # ===================================================================
+    # Webhook Notifications (v1.5.0) — Slack & Teams
+    # ===================================================================
+    def notify_slack(self, webhook_url: str):
+        """Send scan summary to a Slack incoming webhook."""
+        import urllib.request
+        counts = self.summary()
+        total = sum(counts.values())
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "KSPM Security Scan Report"},
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Cluster:*\n{self.cluster_name}"},
+                    {"type": "mrkdwn", "text": f"*Total Findings:*\n{total}"},
+                    {"type": "mrkdwn", "text": f"*:red_circle: Critical:*\n{counts.get('CRITICAL', 0)}"},
+                    {"type": "mrkdwn", "text": f"*:large_orange_circle: High:*\n{counts.get('HIGH', 0)}"},
+                    {"type": "mrkdwn", "text": f"*:large_blue_circle: Medium:*\n{counts.get('MEDIUM', 0)}"},
+                    {"type": "mrkdwn", "text": f"*:large_green_circle: Low:*\n{counts.get('LOW', 0)}"},
+                ],
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Scanner:* kspm_scanner v{VERSION}\n"
+                            f"*Time:* {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+                },
+            },
+        ]
+
+        # Top 5 critical/high findings
+        top_findings = [f for f in self.findings if f.severity in ("CRITICAL", "HIGH")][:5]
+        if top_findings:
+            lines = []
+            for f in top_findings:
+                emoji = ":red_circle:" if f.severity == "CRITICAL" else ":large_orange_circle:"
+                lines.append(f"{emoji} `{f.rule_id}` {f.name} — _{f.file_path}_")
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Top Critical/High Findings:*\n" + "\n".join(lines),
+                },
+            })
+
+        payload = json.dumps({"blocks": blocks}).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    print("[+] Slack notification sent successfully.")
+                else:
+                    print(f"[!] Slack webhook returned status {resp.status}",
+                          file=sys.stderr)
+        except Exception as exc:
+            print(f"[!] Failed to send Slack notification: {exc}",
+                  file=sys.stderr)
+
+    def notify_teams(self, webhook_url: str):
+        """Send scan summary to a Microsoft Teams incoming webhook."""
+        import urllib.request
+        counts = self.summary()
+        total = sum(counts.values())
+
+        facts = [
+            {"name": "Cluster", "value": self.cluster_name},
+            {"name": "Total Findings", "value": str(total)},
+            {"name": "Critical", "value": str(counts.get("CRITICAL", 0))},
+            {"name": "High", "value": str(counts.get("HIGH", 0))},
+            {"name": "Medium", "value": str(counts.get("MEDIUM", 0))},
+            {"name": "Low", "value": str(counts.get("LOW", 0))},
+            {"name": "Scanner", "value": f"kspm_scanner v{VERSION}"},
+            {"name": "Time", "value": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")},
+        ]
+
+        top_findings = [f for f in self.findings if f.severity in ("CRITICAL", "HIGH")][:5]
+        top_text = ""
+        if top_findings:
+            lines = [f"- **[{f.severity}]** `{f.rule_id}` {f.name}" for f in top_findings]
+            top_text = "\n\n**Top Critical/High Findings:**\n" + "\n".join(lines)
+
+        card = {
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "summary": f"KSPM Scan: {total} findings on {self.cluster_name}",
+            "themeColor": "c0392b" if counts.get("CRITICAL", 0) > 0 else (
+                "e67e22" if counts.get("HIGH", 0) > 0 else "326ce5"
+            ),
+            "title": "KSPM Security Scan Report",
+            "sections": [{
+                "activityTitle": f"Cluster: {self.cluster_name}",
+                "facts": facts,
+                "text": top_text,
+            }],
+        }
+
+        payload = json.dumps(card).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    print("[+] Teams notification sent successfully.")
+                else:
+                    print(f"[!] Teams webhook returned status {resp.status}",
+                          file=sys.stderr)
+        except Exception as exc:
+            print(f"[!] Failed to send Teams notification: {exc}",
+                  file=sys.stderr)
+
+    # ===================================================================
+    # PDF Report Generation (v1.5.0)
+    # ===================================================================
+    def save_pdf(self, path: str):
+        """Generate a professional PDF report with executive summary.
+
+        Uses reportlab if available, otherwise falls back to a simple
+        text-based PDF using only the standard library.
+        """
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.units import mm
+            from reportlab.lib import colors
+            from reportlab.platypus import (
+                SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+                PageBreak,
+            )
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            self._save_pdf_reportlab(path, A4, mm, colors, SimpleDocTemplate,
+                                     Paragraph, Spacer, Table, TableStyle,
+                                     PageBreak, getSampleStyleSheet,
+                                     ParagraphStyle)
+        except ImportError:
+            self._save_pdf_fallback(path)
+
+    def _save_pdf_reportlab(self, path, A4, mm, colors, SimpleDocTemplate,
+                            Paragraph, Spacer, Table, TableStyle,
+                            PageBreak, getSampleStyleSheet, ParagraphStyle):
+        """Generate PDF using reportlab (professional layout)."""
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "KSPMTitle", parent=styles["Title"],
+            fontSize=22, textColor=colors.HexColor("#326ce5"),
+            spaceAfter=6,
+        )
+        heading_style = ParagraphStyle(
+            "KSPMHeading", parent=styles["Heading2"],
+            fontSize=14, textColor=colors.HexColor("#326ce5"),
+            spaceBefore=14, spaceAfter=8,
+        )
+        body_style = styles["Normal"]
+
+        doc = SimpleDocTemplate(path, pagesize=A4,
+                                leftMargin=20*mm, rightMargin=20*mm,
+                                topMargin=20*mm, bottomMargin=20*mm)
+        story = []
+
+        # Title page
+        story.append(Paragraph("Kubernetes Security Posture Report", title_style))
+        story.append(Spacer(1, 6*mm))
+        story.append(Paragraph(f"Scanner: kspm_scanner v{VERSION}", body_style))
+        story.append(Paragraph(f"Cluster: {self.cluster_name}", body_style))
+        story.append(Paragraph(
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", body_style))
+        story.append(Paragraph(f"Total Findings: {len(self.findings)}", body_style))
+        story.append(Spacer(1, 10*mm))
+
+        # Executive summary
+        story.append(Paragraph("Executive Summary", heading_style))
+        counts = self.summary()
+        summary_data = [["Severity", "Count"]]
+        sev_colors = {
+            "CRITICAL": colors.HexColor("#c0392b"),
+            "HIGH": colors.HexColor("#e67e22"),
+            "MEDIUM": colors.HexColor("#2980b9"),
+            "LOW": colors.HexColor("#27ae60"),
+        }
+        for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            summary_data.append([sev, str(counts.get(sev, 0))])
+
+        t = Table(summary_data, colWidths=[80*mm, 40*mm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#326ce5")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ALIGN", (1, 0), (1, -1), "CENTER"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+             [colors.HexColor("#f8f8f8"), colors.white]),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 8*mm))
+
+        # Compliance summary
+        story.append(Paragraph("Compliance Framework Coverage", heading_style))
+        comp = self.compliance_summary()
+        comp_data = [["Framework", "Controls", "Findings", "Clean", "Coverage"]]
+        for name, stats in comp.items():
+            comp_data.append([
+                name, str(stats["total_controls"]),
+                str(stats["findings_triggered"]),
+                str(stats["rules_clean"]),
+                f"{stats['coverage_pct']}%",
+            ])
+        ct = Table(comp_data, colWidths=[55*mm, 22*mm, 22*mm, 18*mm, 22*mm])
+        ct.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#326ce5")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+             [colors.HexColor("#f8f8f8"), colors.white]),
+        ]))
+        story.append(ct)
+        story.append(PageBreak())
+
+        # Findings table
+        story.append(Paragraph("Detailed Findings", heading_style))
+        sorted_findings = sorted(
+            self.findings,
+            key=lambda f: (self.SEVERITY_ORDER.get(f.severity, 4),
+                           f.category, f.rule_id),
+        )
+
+        for f in sorted_findings:
+            sev_clr = sev_colors.get(f.severity, colors.grey)
+            story.append(Paragraph(
+                f'<font color="{sev_clr.hexval()}">[{f.severity}]</font> '
+                f'<b>{f.rule_id}</b> — {f.name}',
+                body_style,
+            ))
+            story.append(Paragraph(
+                f'<font size="8">Resource: {f.file_path} | '
+                f'Detail: {f.line_content or "—"}</font>',
+                body_style,
+            ))
+            desc_text = f.description[:200] + ("..." if len(f.description) > 200 else "")
+            rec_text = f.recommendation[:200] + ("..." if len(f.recommendation) > 200 else "")
+            story.append(Paragraph(
+                f'<font size="8" color="#555555">Issue: {desc_text}</font>',
+                body_style,
+            ))
+            story.append(Paragraph(
+                f'<font size="8" color="#27ae60">Fix: {rec_text}</font>',
+                body_style,
+            ))
+            story.append(Spacer(1, 3*mm))
+
+        # Footer
+        story.append(Spacer(1, 10*mm))
+        story.append(Paragraph(
+            f"<font size='8' color='#888888'>Generated by kspm_scanner v{VERSION} "
+            f"— Kubernetes Security Posture Management</font>",
+            body_style,
+        ))
+
+        doc.build(story)
+        print(f"\n[+] PDF report saved to: {os.path.abspath(path)}")
+
+    def _save_pdf_fallback(self, path: str):
+        """Generate a minimal PDF without reportlab (stdlib only)."""
+        counts = self.summary()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        lines = []
+        lines.append(f"KSPM Scanner v{VERSION} - Security Posture Report")
+        lines.append(f"Cluster: {self.cluster_name}")
+        lines.append(f"Generated: {now}")
+        lines.append(f"Total Findings: {len(self.findings)}")
+        lines.append("")
+        lines.append("SEVERITY SUMMARY")
+        lines.append("-" * 40)
+        for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            lines.append(f"  {sev:<12} {counts.get(sev, 0)}")
+        lines.append("")
+        lines.append("FINDINGS")
+        lines.append("=" * 72)
+
+        sorted_findings = sorted(
+            self.findings,
+            key=lambda f: (self.SEVERITY_ORDER.get(f.severity, 4),
+                           f.category, f.rule_id),
+        )
+        for f in sorted_findings:
+            lines.append(f"[{f.severity}] {f.rule_id}  {f.name}")
+            lines.append(f"  Resource: {f.file_path}")
+            lines.append(f"  Detail:   {f.line_content or '-'}")
+            lines.append(f"  Issue:    {f.description[:120]}")
+            lines.append(f"  Fix:      {f.recommendation[:120]}")
+            lines.append("")
+
+        # Minimal PDF 1.4 generation (text only, no external library)
+        text_content = "\n".join(lines)
+        wrapped_lines = []
+        for line in text_content.split("\n"):
+            if len(line) > 95:
+                wrapped_lines.extend(textwrap.wrap(line, 95))
+            else:
+                wrapped_lines.append(line)
+
+        page_height = 792
+        page_width = 612
+        margin_top = 50
+        margin_left = 50
+        line_height = 12
+        usable_height = page_height - 100
+        lines_per_page = usable_height // line_height
+
+        pages = []
+        for i in range(0, len(wrapped_lines), lines_per_page):
+            pages.append(wrapped_lines[i:i + lines_per_page])
+
+        objects = []
+        obj_id = 0
+
+        def next_id():
+            nonlocal obj_id
+            obj_id += 1
+            return obj_id
+
+        catalog_id = next_id()
+        pages_id = next_id()
+        font_id = next_id()
+
+        page_ids = []
+        content_ids = []
+        for _ in pages:
+            page_ids.append(next_id())
+            content_ids.append(next_id())
+
+        pdf_bytes = bytearray()
+
+        def write(s):
+            pdf_bytes.extend(s.encode("latin-1"))
+
+        def write_obj(oid, content):
+            objects.append(len(pdf_bytes))
+            write(f"{oid} 0 obj\n{content}\nendobj\n")
+
+        write("%PDF-1.4\n")
+
+        # Catalog
+        write_obj(catalog_id, f"<< /Type /Catalog /Pages {pages_id} 0 R >>")
+
+        # Pages
+        kids = " ".join(f"{pid} 0 R" for pid in page_ids)
+        write_obj(pages_id,
+                  f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>")
+
+        # Font
+        write_obj(font_id,
+                  "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+
+        # Page and stream objects
+        for idx, page_lines in enumerate(pages):
+            stream_lines = [f"BT /F1 9 Tf {margin_left} {page_height - margin_top} Td "
+                            f"{line_height} TL"]
+            for pl in page_lines:
+                escaped = pl.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+                stream_lines.append(f"({escaped}) '")
+            stream_lines.append("ET")
+            stream_data = "\n".join(stream_lines)
+
+            write_obj(content_ids[idx],
+                      f"<< /Length {len(stream_data)} >>\nstream\n{stream_data}\nendstream")
+
+            write_obj(page_ids[idx],
+                      f"<< /Type /Page /Parent {pages_id} 0 R "
+                      f"/MediaBox [0 0 {page_width} {page_height}] "
+                      f"/Contents {content_ids[idx]} 0 R "
+                      f"/Resources << /Font << /F1 {font_id} 0 R >> >> >>")
+
+        # Xref
+        xref_offset = len(pdf_bytes)
+        write(f"xref\n0 {obj_id + 1}\n")
+        write("0000000000 65535 f \n")
+        for off in objects:
+            write(f"{off:010d} 00000 n \n")
+
+        write(f"trailer\n<< /Size {obj_id + 1} /Root {catalog_id} 0 R >>\n")
+        write(f"startxref\n{xref_offset}\n%%EOF\n")
+
+        with open(path, "wb") as fh:
+            fh.write(bytes(pdf_bytes))
+        print(f"\n[+] PDF report saved to: {os.path.abspath(path)}")
+        print("    (Install 'reportlab' for enhanced PDF layout: pip install reportlab)")
+
+
+# ---------------------------------------------------------------------------
+# Multi-Cluster Scanner (v1.5.0)
+# ---------------------------------------------------------------------------
+def scan_multiple_contexts(contexts, kubeconfig=None, namespaces=None,
+                           all_namespaces=True, verbose=False,
+                           trusted_registries=None, trivy_path=None,
+                           severity="LOW", json_dir=None, html_dir=None,
+                           sarif_dir=None, pdf_dir=None,
+                           baseline_save=None, baseline_compare=None,
+                           slack_webhook=None, teams_webhook=None):
+    """Scan multiple Kubernetes contexts in a single run."""
+    B = "\033[1m"
+    R = "\033[0m"
+    all_results = {}
+
+    print(f"{B}[*] KSPM Multi-Cluster Scan — {len(contexts)} clusters{R}")
+    print(f"[*] Contexts: {', '.join(contexts)}\n")
+
+    for idx, ctx in enumerate(contexts, 1):
+        print(f"{B}{'=' * 76}{R}")
+        print(f"{B}  Cluster {idx}/{len(contexts)}: {ctx}{R}")
+        print(f"{'=' * 76}")
+
+        try:
+            scanner = KSPMScanner(
+                kubeconfig=kubeconfig,
+                context=ctx,
+                namespaces=namespaces,
+                all_namespaces=all_namespaces,
+                verbose=verbose,
+                trusted_registries=trusted_registries,
+                trivy_path=trivy_path,
+            )
+            scanner.scan()
+
+            if baseline_compare:
+                scanner.compare_rbac_baseline(baseline_compare)
+
+            scanner.filter_severity(severity)
+            scanner.print_report()
+
+            if baseline_save:
+                ctx_safe = re.sub(r'[^A-Za-z0-9_-]', '_', ctx)
+                bf = baseline_save.replace(".json", f"_{ctx_safe}.json")
+                scanner.save_rbac_baseline(bf)
+
+            if json_dir:
+                os.makedirs(json_dir, exist_ok=True)
+                ctx_safe = re.sub(r'[^A-Za-z0-9_-]', '_', ctx)
+                scanner.save_json(os.path.join(json_dir, f"kspm_{ctx_safe}.json"))
+            if html_dir:
+                os.makedirs(html_dir, exist_ok=True)
+                ctx_safe = re.sub(r'[^A-Za-z0-9_-]', '_', ctx)
+                scanner.save_html(os.path.join(html_dir, f"kspm_{ctx_safe}.html"))
+            if sarif_dir:
+                os.makedirs(sarif_dir, exist_ok=True)
+                ctx_safe = re.sub(r'[^A-Za-z0-9_-]', '_', ctx)
+                scanner.save_sarif(os.path.join(sarif_dir, f"kspm_{ctx_safe}.sarif"))
+            if pdf_dir:
+                os.makedirs(pdf_dir, exist_ok=True)
+                ctx_safe = re.sub(r'[^A-Za-z0-9_-]', '_', ctx)
+                scanner.save_pdf(os.path.join(pdf_dir, f"kspm_{ctx_safe}.pdf"))
+
+            if slack_webhook:
+                scanner.notify_slack(slack_webhook)
+            if teams_webhook:
+                scanner.notify_teams(teams_webhook)
+
+            all_results[ctx] = {
+                "findings_count": len(scanner.findings),
+                "summary": scanner.summary(),
+            }
+        except Exception as exc:
+            print(f"[!] Failed to scan context '{ctx}': {exc}", file=sys.stderr)
+            all_results[ctx] = {"error": str(exc)}
+
+    # Print consolidated summary
+    print(f"\n{B}{'=' * 76}{R}")
+    print(f"{B}  MULTI-CLUSTER SUMMARY{R}")
+    print(f"{'=' * 76}")
+    print(f"  {'Context':<30} {'Total':>8} {'CRIT':>6} {'HIGH':>6} {'MED':>6} {'LOW':>6}")
+    print(f"  {'-' * 68}")
+    for ctx, res in all_results.items():
+        if "error" in res:
+            print(f"  {ctx:<30} {'ERROR':>8}  {res['error'][:30]}")
+        else:
+            s = res["summary"]
+            print(f"  {ctx:<30} {res['findings_count']:>8} "
+                  f"{s.get('CRITICAL', 0):>6} {s.get('HIGH', 0):>6} "
+                  f"{s.get('MEDIUM', 0):>6} {s.get('LOW', 0):>6}")
+    print(f"{'=' * 76}")
+
+    return all_results
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -4083,6 +4781,21 @@ def main():
                         help="Comma-separated list of additional trusted image registries")
     parser.add_argument("--trivy-path", metavar="PATH",
                         help="Path to trivy binary (auto-detected if not set)")
+    # v1.5.0 args
+    parser.add_argument("--contexts", metavar="CTX1,CTX2,...",
+                        help="Scan multiple contexts (comma-separated)")
+    parser.add_argument("--sarif", metavar="FILE",
+                        help="Save findings in SARIF v2.1.0 format")
+    parser.add_argument("--pdf", metavar="FILE",
+                        help="Save findings as PDF report")
+    parser.add_argument("--diff", metavar="PREV_JSON",
+                        help="Compare current scan against a previous JSON report")
+    parser.add_argument("--diff-output", metavar="FILE",
+                        help="Save diff report as JSON (requires --diff)")
+    parser.add_argument("--slack-webhook", metavar="URL",
+                        help="Send scan summary to Slack webhook URL")
+    parser.add_argument("--teams-webhook", metavar="URL",
+                        help="Send scan summary to Teams webhook URL")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Verbose output")
     parser.add_argument("--version", action="version",
@@ -4104,6 +4817,30 @@ def main():
     if args.trusted_registries:
         trusted_regs = {r.strip() for r in args.trusted_registries.split(",") if r.strip()}
 
+    # --- Multi-cluster mode ---
+    if args.contexts:
+        contexts = [c.strip() for c in args.contexts.split(",") if c.strip()]
+        scan_multiple_contexts(
+            contexts=contexts,
+            kubeconfig=args.kubeconfig or None,
+            namespaces=namespaces,
+            all_namespaces=args.all_namespaces,
+            verbose=args.verbose,
+            trusted_registries=trusted_regs,
+            trivy_path=args.trivy_path or None,
+            severity=args.severity,
+            json_dir=args.json,
+            html_dir=args.html,
+            sarif_dir=args.sarif,
+            pdf_dir=args.pdf,
+            baseline_save=args.baseline_save,
+            baseline_compare=args.baseline_compare,
+            slack_webhook=args.slack_webhook,
+            teams_webhook=args.teams_webhook,
+        )
+        sys.exit(0)
+
+    # --- Single-cluster mode ---
     scanner = KSPMScanner(
         kubeconfig=args.kubeconfig or None,
         context=args.context or None,
@@ -4128,6 +4865,27 @@ def main():
         scanner.save_json(args.json)
     if args.html:
         scanner.save_html(args.html)
+    if args.sarif:
+        scanner.save_sarif(args.sarif)
+    if args.pdf:
+        scanner.save_pdf(args.pdf)
+    if args.slack_webhook:
+        scanner.notify_slack(args.slack_webhook)
+    if args.teams_webhook:
+        scanner.notify_teams(args.teams_webhook)
+
+    # Diff reporting (requires --json to have current scan, and --diff for previous)
+    if args.diff:
+        if args.json:
+            KSPMScanner.diff_reports(args.json, args.diff, args.diff_output)
+        else:
+            # Save temp JSON for comparison, then diff
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
+                tmp_path = tmp.name
+            scanner.save_json(tmp_path)
+            KSPMScanner.diff_reports(tmp_path, args.diff, args.diff_output)
+            os.unlink(tmp_path)
 
     has_critical_high = any(
         f.severity in ("CRITICAL", "HIGH") for f in scanner.findings
