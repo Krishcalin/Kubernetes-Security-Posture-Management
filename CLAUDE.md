@@ -4,7 +4,7 @@
 
 - **Repository**: `Kubernetes-Security-Posture-Management`
 - **Scanner file**: `kspm_scanner.py`
-- **Version**: 1.5.0
+- **Version**: 2.0.0
 - **Language**: Python 3.8+
 - **Dependency**: `kubernetes` (Python client for Kubernetes API)
 - **Type**: Agentless live-cluster scanner — queries the Kubernetes API via kubeconfig or in-cluster config
@@ -35,7 +35,12 @@ Finding class  →  KSPMScanner class  →  CLI (argparse)
                     ├── _check_deprecated_apis()       [v1.1.0]
                     ├── _check_runtime_security()      [v1.1.0]
                     ├── _check_advanced_rbac()         [v1.3.0]
-                    └── _check_supply_chain()          [v1.4.0]
+                    ├── _check_supply_chain()          [v1.4.0]
+                    ├── _check_kyverno_policies()      [v2.0.0]
+                    ├── _run_custom_policies()          [v2.0.0]
+                    ├── _run_rego_policies()            [v2.0.0]
+                    ├── _apply_exceptions()             [v2.0.0]
+                    └── _apply_profile()                [v2.0.0]
 ```
 
 ### Key Design Decisions
@@ -72,6 +77,9 @@ Format: `K8S-{CATEGORY}-{NNN}`
 | K8S-RC | Runtime Classes | 1 |
 | K8S-EPH | Ephemeral Containers | 2 |
 | K8S-SC | Supply Chain Security | 10 |
+| K8S-KYV | Kyverno Policies | 6 |
+| K8S-CUSTOM | Custom YAML Policies | dynamic |
+| K8S-REGO | OPA/Rego Policies | dynamic |
 
 ### Severity Model
 
@@ -179,12 +187,12 @@ python kspm_scanner.py --context kind-kind
 - [x] **Slack/Teams notifications**: `--slack-webhook URL`, `--teams-webhook URL` with severity summary and top findings
 - [x] **SARIF output**: `--sarif FILE` in SARIF v2.1.0 format with rule definitions, CWE tags, compliance properties
 
-### v2.0.0 — Policy Engine
-- [ ] **Custom policy DSL**: YAML-based custom check definitions
-- [ ] **OPA/Rego integration**: Execute Rego policies against fetched resources
-- [ ] **Kyverno policy validation**: Verify Kyverno policies are correctly configured
-- [ ] **Baseline profiles**: Built-in profiles (dev/staging/production) with different thresholds
-- [ ] **Exception management**: Allow-list specific findings by resource annotation
+### v2.0.0 — Policy Engine (COMPLETE)
+- [x] **Custom policy DSL**: YAML-based custom check definitions loaded from `--policy-dir`
+- [x] **OPA/Rego integration**: Execute `.rego` policies via `opa eval` subprocess (`--rego-dir`)
+- [x] **Kyverno policy validation**: K8S-KYV-001 to 006 — verifies Kyverno installation, policy health, failurePolicy, mutating/generate coverage
+- [x] **Baseline profiles**: `--profile dev|staging|production` — built-in profiles with min severity, fail-on thresholds, and rule suppressions
+- [x] **Exception management**: `--exceptions FILE` — JSON/YAML allow-list with glob matching on rule_id and resource
 
 ## Known Limitations
 

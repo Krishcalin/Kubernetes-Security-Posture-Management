@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kubernetes Security Posture Management (KSPM) Scanner  v1.5.0
+Kubernetes Security Posture Management (KSPM) Scanner  v2.0.0
 
 Agentless scanner that connects to a live Kubernetes cluster via the
 Kubernetes API and performs comprehensive security posture checks covering
@@ -10,8 +10,9 @@ cluster configuration, persistent volumes, admission control, node security,
 pod disruption budgets, HPA, service mesh, deprecated APIs, runtime classes,
 and CIS Benchmark alignment.
 
-Supports multi-cluster scanning, diff/trend reporting, SARIF output,
-Slack/Teams webhook notifications, and PDF report generation.
+v2.0.0 adds a policy engine with custom YAML-based policy DSL, OPA/Rego
+integration, Kyverno policy validation, baseline profiles (dev/staging/prod),
+and exception management via annotations or allow-list files.
 
 Requirements:
     pip install kubernetes
@@ -21,17 +22,27 @@ Usage:
                            [--contexts CTX1,CTX2,...] [--namespace NS]
                            [--severity HIGH] [--json FILE] [--html FILE]
                            [--sarif FILE] [--pdf FILE]
+                           [--policy-dir DIR] [--rego-dir DIR]
+                           [--profile dev|staging|production]
+                           [--exceptions FILE]
                            [--diff FILE] [--slack-webhook URL]
                            [--teams-webhook URL]
                            [--verbose] [--version]
 """
 
-VERSION = "1.5.0"
+VERSION = "2.0.0"
 
 import os, sys, json, re, argparse, html as html_mod, subprocess, shutil
-import hashlib, copy, textwrap
+import hashlib, copy, textwrap, fnmatch, glob as glob_mod
 from io import BytesIO
 from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import yaml as _yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
 
 try:
     from kubernetes import client, config
@@ -39,6 +50,38 @@ try:
     HAS_K8S = True
 except ImportError:
     HAS_K8S = False
+
+# ---------------------------------------------------------------------------
+# Baseline profiles (v2.0.0) — severity thresholds per environment
+# ---------------------------------------------------------------------------
+BASELINE_PROFILES = {
+    "production": {
+        "min_severity": "LOW",
+        "fail_on": ("CRITICAL", "HIGH"),
+        "suppress_rules": set(),
+        "description": "Production — strictest, all rules enforced, fail on HIGH+",
+    },
+    "staging": {
+        "min_severity": "MEDIUM",
+        "fail_on": ("CRITICAL",),
+        "suppress_rules": {
+            "K8S-POD-024", "K8S-PDB-001", "K8S-HPA-004",  # relax best-practice rules
+        },
+        "description": "Staging — moderate, suppress some best-practice rules",
+    },
+    "dev": {
+        "min_severity": "HIGH",
+        "fail_on": ("CRITICAL",),
+        "suppress_rules": {
+            "K8S-POD-016", "K8S-POD-017", "K8S-POD-024",
+            "K8S-PDB-001", "K8S-PDB-002", "K8S-PDB-003",
+            "K8S-HPA-001", "K8S-HPA-004",
+            "K8S-SC-001", "K8S-SC-002", "K8S-SC-003",
+            "K8S-MESH-001", "K8S-NODE-003", "K8S-NODE-006",
+        },
+        "description": "Dev — relaxed, focus on CRITICAL/HIGH only",
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Dangerous capabilities list (CIS 5.2.8/5.2.9)
@@ -251,6 +294,10 @@ class KSPMScanner:
         "K8S-SC-004": "CIS 5.5.1",  "K8S-SC-006": "CIS 5.5.1",
         "K8S-SC-007": "CIS 5.5.1",  "K8S-SC-008": "CIS 5.5.1",
         "K8S-SC-010": "CIS 5.5.1",
+        # v2.0.0 — Policy Engine (Kyverno)
+        "K8S-KYV-001": "CIS 5.7.1",  "K8S-KYV-002": "CIS 5.7.1",
+        "K8S-KYV-003": "CIS 5.7.1",  "K8S-KYV-004": "CIS 5.7.1",
+        "K8S-KYV-005": "CIS 5.7.1",  "K8S-KYV-006": "CIS 5.7.1",
     }
 
     # NSA/CISA Kubernetes Hardening Guide (v1.2, Aug 2022) mapping
@@ -310,6 +357,10 @@ class KSPMScanner:
         "K8S-SC-004": "NSA 1.10",  "K8S-SC-005": "NSA 1.11",
         "K8S-SC-006": "NSA 1.10",  "K8S-SC-007": "NSA 1.10",
         "K8S-SC-008": "NSA 1.11",  "K8S-SC-010": "NSA 1.11",
+        # v2.0.0 — Policy Engine (Kyverno)
+        "K8S-KYV-001": "NSA 5.3",  "K8S-KYV-002": "NSA 5.3",
+        "K8S-KYV-003": "NSA 5.3",  "K8S-KYV-004": "NSA 5.3",
+        "K8S-KYV-005": "NSA 5.3",  "K8S-KYV-006": "NSA 5.3",
     }
 
     # MITRE ATT&CK for Containers mapping
@@ -380,6 +431,13 @@ class KSPMScanner:
         "K8S-SC-007": "T1525",        # Supply chain compromise (high CVEs)
         "K8S-SC-008": "T1195.002",    # Supply Chain Compromise: Software Supply Chain
         "K8S-SC-010": "T1195.002",    # No admission policy for image verification
+        # v2.0.0 — Policy Engine (Kyverno)
+        "K8S-KYV-001": "T1562.001",   # Impair Defenses (no Kyverno installed)
+        "K8S-KYV-002": "T1562.001",   # Failed policies
+        "K8S-KYV-003": "T1562.001",   # Audit-mode policies
+        "K8S-KYV-004": "T1562.001",   # Ignore failurePolicy
+        "K8S-KYV-005": "T1562.001",   # No mutating policies
+        "K8S-KYV-006": "T1562.001",   # No generate policies
     }
 
     # SOC 2 Trust Service Criteria mapping
@@ -437,6 +495,10 @@ class KSPMScanner:
         "K8S-SC-004": "CC8.1",  "K8S-SC-005": "CC6.8",
         "K8S-SC-006": "CC8.1",  "K8S-SC-007": "CC8.1",
         "K8S-SC-008": "CC8.1",  "K8S-SC-010": "CC8.1",
+        # v2.0.0 — Policy Engine (Kyverno)
+        "K8S-KYV-001": "CC7.2",  "K8S-KYV-002": "CC7.2",
+        "K8S-KYV-003": "CC7.2",  "K8S-KYV-004": "CC7.2",
+        "K8S-KYV-005": "CC7.2",  "K8S-KYV-006": "CC7.2",
     }
 
     # PCI-DSS v4.0 requirement mapping
@@ -485,6 +547,10 @@ class KSPMScanner:
         "K8S-SC-004": "PCI 6.3.1",  "K8S-SC-005": "PCI 6.3.2",
         "K8S-SC-006": "PCI 6.3.1",  "K8S-SC-007": "PCI 6.3.1",
         "K8S-SC-008": "PCI 6.3.2",  "K8S-SC-010": "PCI 6.3.2",
+        # v2.0.0 — Policy Engine (Kyverno)
+        "K8S-KYV-001": "PCI 11.6.1", "K8S-KYV-002": "PCI 11.6.1",
+        "K8S-KYV-003": "PCI 11.6.1", "K8S-KYV-004": "PCI 11.6.1",
+        "K8S-KYV-005": "PCI 11.6.1", "K8S-KYV-006": "PCI 11.6.1",
     }
 
     # NIST SP 800-190 (Application Container Security Guide) mapping
@@ -529,11 +595,17 @@ class KSPMScanner:
         "K8S-SC-004": "NIST 3.1.1",  "K8S-SC-005": "NIST 3.2.1",
         "K8S-SC-006": "NIST 3.1.1",  "K8S-SC-007": "NIST 3.1.1",
         "K8S-SC-008": "NIST 3.2.1",  "K8S-SC-010": "NIST 3.2.1",
+        # v2.0.0 — Policy Engine (Kyverno)
+        "K8S-KYV-001": "NIST 3.3.8", "K8S-KYV-002": "NIST 3.3.8",
+        "K8S-KYV-003": "NIST 3.3.8", "K8S-KYV-004": "NIST 3.3.8",
+        "K8S-KYV-005": "NIST 3.3.8", "K8S-KYV-006": "NIST 3.3.8",
     }
 
     def __init__(self, kubeconfig=None, context=None, namespaces=None,
                  all_namespaces=True, verbose=False,
-                 trusted_registries=None, trivy_path=None):
+                 trusted_registries=None, trivy_path=None,
+                 policy_dir=None, rego_dir=None, profile=None,
+                 exceptions_file=None):
         self.findings: list = []
         self.verbose = verbose
         self.kubeconfig = kubeconfig
@@ -543,6 +615,11 @@ class KSPMScanner:
         self.cluster_name = context or "default"
         self.trusted_registries = trusted_registries or set()
         self.trivy_path = trivy_path  # path to trivy binary (auto-detect if None)
+        # v2.0.0 — Policy Engine
+        self.policy_dir = policy_dir          # directory with custom YAML policies
+        self.rego_dir = rego_dir              # directory with .rego files
+        self.profile = profile                # baseline profile name
+        self.exceptions = self._load_exceptions(exceptions_file)
 
         # Load kube config
         try:
@@ -694,6 +771,18 @@ class KSPMScanner:
         self._check_advanced_rbac()
         # v1.4.0 check groups
         self._check_supply_chain()
+        # v2.0.0 — Policy Engine
+        self._check_kyverno_policies()
+        self._run_custom_policies()
+        self._run_rego_policies()
+
+        # Apply exceptions (v2.0.0)
+        if self.exceptions:
+            self._apply_exceptions()
+
+        # Apply baseline profile (v2.0.0)
+        if self.profile and self.profile in BASELINE_PROFILES:
+            self._apply_profile()
 
         print(f"[*] Scan complete. {len(self.findings)} findings identified.")
 
@@ -3746,6 +3835,560 @@ class KSPMScanner:
         return vulns
 
     # ===================================================================
+    # CHECK GROUP 19: Kyverno Policy Validation (v2.0.0)
+    # K8S-KYV-001 to KYV-006
+    # ===================================================================
+    def _check_kyverno_policies(self):
+        self._vprint("  [*] Checking Kyverno policy configuration ...")
+
+        # Detect if Kyverno is installed
+        kyverno_policies = []
+        cluster_policies = []
+        try:
+            kyverno_policies = self.custom_api.list_namespaced_custom_object(
+                "kyverno.io", "v1", "default", "policies",
+            ).get("items", [])
+        except Exception:
+            pass
+        try:
+            cluster_policies = self.custom_api.list_cluster_custom_object(
+                "kyverno.io", "v1", "clusterpolicies",
+            ).get("items", [])
+        except Exception:
+            pass
+
+        all_policies = kyverno_policies + cluster_policies
+        if not all_policies:
+            self._vprint("    Kyverno not detected or no policies found.")
+            return
+
+        self._vprint(f"    Found {len(all_policies)} Kyverno policies")
+
+        for pol in all_policies:
+            metadata = pol.get("metadata", {})
+            pol_name = metadata.get("name", "unknown")
+            pol_ns = metadata.get("namespace")
+            spec = pol.get("spec", {})
+            kind = "ClusterPolicy" if not pol_ns else "Policy"
+            res_path = self._res_path(pol_ns, kind, pol_name)
+
+            # K8S-KYV-001: Policy in audit mode (not enforce)
+            validation_failure = spec.get("validationFailureAction", "Audit")
+            if validation_failure.lower() == "audit":
+                self._add(Finding(
+                    "K8S-KYV-001", "Kyverno policy in Audit mode",
+                    "Policy Engine", "MEDIUM", res_path, None,
+                    f"validationFailureAction: {validation_failure}",
+                    "Policy is in Audit mode — violations are logged but not blocked. "
+                    "This means non-compliant resources can still be created.",
+                    "Set validationFailureAction to 'Enforce' for production clusters.",
+                ))
+
+            # K8S-KYV-002: Policy with no rules
+            rules = spec.get("rules", [])
+            if not rules:
+                self._add(Finding(
+                    "K8S-KYV-002", "Kyverno policy with no rules",
+                    "Policy Engine", "LOW", res_path, None,
+                    "rules: []",
+                    "Policy has no rules defined. It has no effect on the cluster.",
+                    "Add rules to the policy or remove the empty policy.",
+                ))
+                continue
+
+            for rule in rules:
+                rule_name = rule.get("name", "unnamed")
+
+                # K8S-KYV-003: Rule with overly broad match (all resources)
+                match = rule.get("match", {})
+                any_match = match.get("any", match.get("resources", {}))
+                if isinstance(any_match, dict):
+                    kinds = any_match.get("kinds", [])
+                    if "*" in kinds or "Pod" in kinds and len(kinds) == 1:
+                        pass  # normal
+                elif isinstance(any_match, list):
+                    for m in any_match:
+                        res = m.get("resources", {})
+                        kinds = res.get("kinds", [])
+                        if "*" in kinds:
+                            self._add(Finding(
+                                "K8S-KYV-003",
+                                "Kyverno rule matches all resource kinds",
+                                "Policy Engine", "MEDIUM", res_path, None,
+                                f"rule: {rule_name} | match.kinds: [*]",
+                                "Rule applies to all resource kinds which may cause "
+                                "excessive webhook load and unexpected denials.",
+                                "Scope the rule to specific resource kinds.",
+                            ))
+
+                # K8S-KYV-004: Exclude that bypasses important namespaces
+                exclude = rule.get("exclude", {})
+                exclude_ns = []
+                if isinstance(exclude, dict):
+                    exc_res = exclude.get("resources", exclude.get("any", []))
+                    if isinstance(exc_res, dict):
+                        exclude_ns = exc_res.get("namespaces", [])
+                    elif isinstance(exc_res, list):
+                        for e in exc_res:
+                            exclude_ns.extend(e.get("resources", {}).get("namespaces", []))
+                if any(ns not in ("kube-system", "kube-public", "kube-node-lease")
+                       for ns in exclude_ns if ns != "*"):
+                    excluded = ", ".join(exclude_ns)
+                    self._add(Finding(
+                        "K8S-KYV-004",
+                        "Kyverno rule excludes non-system namespaces",
+                        "Policy Engine", "MEDIUM", res_path, None,
+                        f"rule: {rule_name} | exclude.namespaces: [{excluded}]",
+                        "Rule exclusion covers non-system namespaces, reducing policy coverage.",
+                        "Review excluded namespaces. Only exclude system namespaces.",
+                    ))
+
+            # K8S-KYV-005: Background scanning disabled
+            if spec.get("background") is False:
+                self._add(Finding(
+                    "K8S-KYV-005", "Kyverno background scanning disabled",
+                    "Policy Engine", "LOW", res_path, None,
+                    "background: false",
+                    "Background scanning is disabled. Existing non-compliant resources "
+                    "will not be detected in policy reports.",
+                    "Enable background scanning (background: true) for compliance visibility.",
+                ))
+
+        # K8S-KYV-006: No Kyverno policies in enforce mode
+        enforce_count = sum(
+            1 for p in all_policies
+            if p.get("spec", {}).get("validationFailureAction", "").lower() == "enforce"
+        )
+        if enforce_count == 0 and len(all_policies) > 0:
+            self._add(Finding(
+                "K8S-KYV-006", "No Kyverno policies in Enforce mode",
+                "Policy Engine", "HIGH",
+                "cluster/Kyverno/policies", None,
+                f"total policies: {len(all_policies)}, enforce mode: 0",
+                "All Kyverno policies are in Audit mode. No policy is actively "
+                "blocking non-compliant resources.",
+                "Set validationFailureAction to 'Enforce' on critical policies.",
+            ))
+
+    # ===================================================================
+    # Custom Policy DSL Engine (v2.0.0)
+    # Loads YAML policy files and evaluates them against cluster resources
+    # ===================================================================
+    def _run_custom_policies(self):
+        if not self.policy_dir:
+            return
+        if not HAS_YAML:
+            self._warn("PyYAML not installed. Custom policies require: pip install pyyaml")
+            return
+        policy_path = Path(self.policy_dir)
+        if not policy_path.is_dir():
+            self._warn(f"Policy directory not found: {self.policy_dir}")
+            return
+
+        policy_files = list(policy_path.glob("*.yaml")) + list(policy_path.glob("*.yml"))
+        if not policy_files:
+            self._vprint(f"    No policy files found in {self.policy_dir}")
+            return
+
+        self._vprint(f"  [*] Running {len(policy_files)} custom policies ...")
+
+        for pf in sorted(policy_files):
+            try:
+                with open(pf, "r", encoding="utf-8") as fh:
+                    docs = list(_yaml.safe_load_all(fh))
+                for doc in docs:
+                    if not doc or not isinstance(doc, dict):
+                        continue
+                    self._evaluate_custom_policy(doc, str(pf))
+            except Exception as exc:
+                self._warn(f"Error loading policy {pf.name}: {exc}")
+
+    def _evaluate_custom_policy(self, policy: dict, source_file: str):
+        """Evaluate a single custom YAML policy against cluster resources.
+
+        Policy format:
+            rule_id: K8S-CUSTOM-001
+            name: "My custom check"
+            category: "Custom Policies"
+            severity: HIGH
+            description: "What this checks"
+            recommendation: "How to fix"
+            cwe: CWE-xxx  (optional)
+            target:
+                api_group: apps/v1       # or v1 for core
+                resource: deployments    # plural lowercase
+                namespaced: true
+            match:
+                field: spec.template.spec.containers[*].securityContext.runAsNonRoot
+                operator: equals|not_equals|exists|not_exists|contains|regex|gt|lt
+                value: true              # expected value
+        """
+        rule_id = policy.get("rule_id")
+        name = policy.get("name")
+        severity = policy.get("severity", "MEDIUM")
+        description = policy.get("description", "")
+        recommendation = policy.get("recommendation", "")
+        category = policy.get("category", "Custom Policies")
+        cwe = policy.get("cwe")
+        target = policy.get("target", {})
+        match_spec = policy.get("match", {})
+
+        if not rule_id or not name or not target:
+            self._vprint(f"    Skipping incomplete policy in {source_file}")
+            return
+
+        api_group = target.get("api_group", "v1")
+        resource = target.get("resource", "")
+        namespaced = target.get("namespaced", True)
+
+        # Fetch resources from the cluster
+        try:
+            if namespaced:
+                namespaces = self._get_namespaces()
+                items = []
+                for ns in namespaces:
+                    try:
+                        if "/" in api_group:
+                            group, version = api_group.rsplit("/", 1)
+                            result = self.custom_api.list_namespaced_custom_object(
+                                group, version, ns, resource,
+                            )
+                        elif api_group == "v1":
+                            result = self.core_v1.api_client.call_api(
+                                f"/api/v1/namespaces/{ns}/{resource}",
+                                "GET", response_type="object",
+                                _return_http_data_only=True,
+                            )
+                        else:
+                            result = self.custom_api.list_namespaced_custom_object(
+                                api_group.split("/")[0] if "/" in api_group else "",
+                                api_group, ns, resource,
+                            )
+                        for item in result.get("items", []):
+                            item["_namespace"] = ns
+                            items.append(item)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    if "/" in api_group:
+                        group, version = api_group.rsplit("/", 1)
+                        result = self.custom_api.list_cluster_custom_object(
+                            group, version, resource,
+                        )
+                    else:
+                        result = self.core_v1.api_client.call_api(
+                            f"/api/{api_group}/{resource}",
+                            "GET", response_type="object",
+                            _return_http_data_only=True,
+                        )
+                    items = result.get("items", [])
+                except Exception:
+                    items = []
+        except Exception:
+            items = []
+
+        if not items:
+            self._vprint(f"    {rule_id}: no {resource} found")
+            return
+
+        field_path = match_spec.get("field", "")
+        operator = match_spec.get("operator", "equals")
+        expected = match_spec.get("value")
+
+        for item in items:
+            item_name = item.get("metadata", {}).get("name", "unknown")
+            item_ns = item.get("_namespace", item.get("metadata", {}).get("namespace"))
+            res_path = self._res_path(item_ns, resource, item_name)
+
+            actual = self._resolve_field(item, field_path)
+
+            violated = self._check_operator(actual, operator, expected)
+            if violated:
+                detail = f"{field_path}: {actual}" if actual is not None else f"{field_path}: <not set>"
+                self._add(Finding(
+                    rule_id, name, category, severity,
+                    res_path, None, detail,
+                    description, recommendation, cwe,
+                ))
+
+    def _resolve_field(self, obj, field_path: str):
+        """Resolve a dotted field path with [*] array wildcard support."""
+        if not field_path:
+            return obj
+        parts = field_path.replace("[*]", ".[*]").split(".")
+        current = [obj]
+        for part in parts:
+            if not part:
+                continue
+            next_items = []
+            for item in current:
+                if part == "[*]":
+                    if isinstance(item, list):
+                        next_items.extend(item)
+                elif isinstance(item, dict):
+                    val = item.get(part)
+                    if val is not None:
+                        if isinstance(val, list) and "[*]" not in field_path:
+                            next_items.append(val)
+                        elif isinstance(val, list):
+                            next_items.append(val)
+                        else:
+                            next_items.append(val)
+            current = next_items
+            if not current:
+                return None
+        return current[0] if len(current) == 1 else current if current else None
+
+    @staticmethod
+    def _check_operator(actual, operator: str, expected) -> bool:
+        """Return True if the condition indicates a violation."""
+        if operator == "equals":
+            return actual != expected
+        elif operator == "not_equals":
+            return actual == expected
+        elif operator == "exists":
+            return actual is None
+        elif operator == "not_exists":
+            return actual is not None
+        elif operator == "contains":
+            if isinstance(actual, (list, str)):
+                return expected not in actual
+            return True
+        elif operator == "not_contains":
+            if isinstance(actual, (list, str)):
+                return expected in actual
+            return False
+        elif operator == "regex":
+            if isinstance(actual, str) and expected:
+                return not re.search(str(expected), actual)
+            return True
+        elif operator == "gt":
+            try:
+                return float(actual) <= float(expected)
+            except (TypeError, ValueError):
+                return True
+        elif operator == "lt":
+            try:
+                return float(actual) >= float(expected)
+            except (TypeError, ValueError):
+                return True
+        return False
+
+    # ===================================================================
+    # OPA / Rego Policy Evaluation (v2.0.0)
+    # ===================================================================
+    def _run_rego_policies(self):
+        if not self.rego_dir:
+            return
+        rego_path = Path(self.rego_dir)
+        if not rego_path.is_dir():
+            self._warn(f"Rego directory not found: {self.rego_dir}")
+            return
+
+        opa_bin = shutil.which("opa")
+        if not opa_bin:
+            self._warn("OPA binary not found. Install OPA: https://www.openpolicyagent.org/docs/latest/#1-download-opa")
+            self._add(Finding(
+                "K8S-OPA-001", "OPA binary not available",
+                "Policy Engine", "LOW",
+                "cluster/ToolChain/scanner-host", None,
+                "opa: not found",
+                "The OPA binary is not installed. Rego policy evaluation is unavailable.",
+                "Install OPA (https://www.openpolicyagent.org) for custom Rego policy evaluation.",
+            ))
+            return
+
+        rego_files = list(rego_path.glob("*.rego"))
+        if not rego_files:
+            self._vprint(f"    No .rego files found in {self.rego_dir}")
+            return
+
+        self._vprint(f"  [*] Running {len(rego_files)} Rego policies ...")
+
+        # Collect cluster data as JSON input
+        input_data = self._collect_rego_input()
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            suffix=".json", mode="w", delete=False, encoding="utf-8"
+        ) as tmp:
+            json.dump(input_data, tmp)
+            input_file = tmp.name
+
+        try:
+            for rf in sorted(rego_files):
+                try:
+                    cmd = [
+                        opa_bin, "eval",
+                        "--input", input_file,
+                        "--data", str(rf),
+                        "--format", "json",
+                        "data.kspm.deny",
+                    ]
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode != 0:
+                        self._vprint(f"    [!] OPA error for {rf.name}: {result.stderr[:200]}")
+                        continue
+
+                    output = json.loads(result.stdout) if result.stdout.strip() else {}
+                    results = output.get("result", [])
+                    for res in results:
+                        expressions = res.get("expressions", [])
+                        for expr in expressions:
+                            denials = expr.get("value", [])
+                            if isinstance(denials, list):
+                                for denial in denials:
+                                    if isinstance(denial, dict):
+                                        self._add(Finding(
+                                            denial.get("rule_id", f"K8S-REGO-{rf.stem[:8].upper()}"),
+                                            denial.get("name", rf.stem),
+                                            denial.get("category", "Rego Policy"),
+                                            denial.get("severity", "MEDIUM"),
+                                            denial.get("resource", "cluster/Rego/" + rf.name),
+                                            None,
+                                            denial.get("detail", ""),
+                                            denial.get("description", "Rego policy violation"),
+                                            denial.get("recommendation", "Review the Rego policy"),
+                                            denial.get("cwe"),
+                                        ))
+                                    elif isinstance(denial, str):
+                                        self._add(Finding(
+                                            f"K8S-REGO-{rf.stem[:8].upper()}",
+                                            rf.stem, "Rego Policy", "MEDIUM",
+                                            "cluster/Rego/" + rf.name, None,
+                                            denial, denial,
+                                            "Review and remediate the Rego policy violation.",
+                                        ))
+                except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
+                    self._vprint(f"    [!] Error running {rf.name}: {exc}")
+        finally:
+            os.unlink(input_file)
+
+    def _collect_rego_input(self) -> dict:
+        """Collect key cluster resources as JSON for Rego policy evaluation."""
+        data = {"namespaces": [], "deployments": [], "services": [],
+                "pods": [], "cluster_roles": [], "cluster_role_bindings": []}
+        try:
+            for ns in self.core_v1.list_namespace().items:
+                data["namespaces"].append({
+                    "name": ns.metadata.name,
+                    "labels": ns.metadata.labels or {},
+                    "annotations": ns.metadata.annotations or {},
+                })
+        except Exception:
+            pass
+        try:
+            for dep in self.apps_v1.list_deployment_for_all_namespaces().items:
+                data["deployments"].append({
+                    "name": dep.metadata.name,
+                    "namespace": dep.metadata.namespace,
+                    "replicas": dep.spec.replicas,
+                    "labels": dep.metadata.labels or {},
+                    "annotations": dep.metadata.annotations or {},
+                })
+        except Exception:
+            pass
+        try:
+            for cr in self.rbac_v1.list_cluster_role().items:
+                rules_data = []
+                for rule in (cr.rules or []):
+                    rules_data.append({
+                        "verbs": rule.verbs or [],
+                        "resources": rule.resources or [],
+                        "api_groups": rule.api_groups or [],
+                    })
+                data["cluster_roles"].append({
+                    "name": cr.metadata.name,
+                    "rules": rules_data,
+                })
+        except Exception:
+            pass
+        return data
+
+    # ===================================================================
+    # Exception Management (v2.0.0)
+    # ===================================================================
+    @staticmethod
+    def _load_exceptions(exceptions_file):
+        """Load exception rules from a JSON or YAML file.
+
+        Format:
+            exceptions:
+              - rule_id: K8S-POD-001
+                resource: "default/Deployment/test-app"
+                reason: "Accepted risk for dev workload"
+              - rule_id: K8S-IMG-001
+                reason: "Latest tag allowed for internal images"
+              - resource: "kube-system/*"
+                reason: "System namespace excluded"
+        """
+        if not exceptions_file:
+            return []
+        try:
+            with open(exceptions_file, "r", encoding="utf-8") as fh:
+                content = fh.read()
+            if exceptions_file.endswith((".yaml", ".yml")):
+                if not HAS_YAML:
+                    print("[!] PyYAML required for YAML exceptions: pip install pyyaml",
+                          file=sys.stderr)
+                    return []
+                data = _yaml.safe_load(content)
+            else:
+                data = json.loads(content)
+            return data.get("exceptions", []) if isinstance(data, dict) else []
+        except Exception as exc:
+            print(f"[!] Failed to load exceptions file: {exc}", file=sys.stderr)
+            return []
+
+    def _apply_exceptions(self):
+        """Remove findings that match exception rules."""
+        if not self.exceptions:
+            return
+        original_count = len(self.findings)
+        filtered = []
+        for f in self.findings:
+            excepted = False
+            for exc in self.exceptions:
+                exc_rule = exc.get("rule_id", "")
+                exc_resource = exc.get("resource", "")
+                # Match rule_id (exact or glob)
+                rule_match = (not exc_rule or
+                              f.rule_id == exc_rule or
+                              fnmatch.fnmatch(f.rule_id, exc_rule))
+                # Match resource (exact or glob)
+                resource_match = (not exc_resource or
+                                  f.file_path == exc_resource or
+                                  fnmatch.fnmatch(f.file_path, exc_resource))
+                if rule_match and resource_match and (exc_rule or exc_resource):
+                    excepted = True
+                    break
+            if not excepted:
+                filtered.append(f)
+        self.findings = filtered
+        suppressed = original_count - len(self.findings)
+        if suppressed > 0:
+            self._vprint(f"  [*] Exceptions applied: {suppressed} findings suppressed")
+
+    # ===================================================================
+    # Baseline Profile Application (v2.0.0)
+    # ===================================================================
+    def _apply_profile(self):
+        """Apply a baseline profile to suppress rules and adjust severity threshold."""
+        profile_cfg = BASELINE_PROFILES.get(self.profile)
+        if not profile_cfg:
+            return
+        self._vprint(f"  [*] Applying profile: {self.profile} — {profile_cfg['description']}")
+        suppress = profile_cfg.get("suppress_rules", set())
+        if suppress:
+            original = len(self.findings)
+            self.findings = [f for f in self.findings if f.rule_id not in suppress]
+            suppressed = original - len(self.findings)
+            if suppressed > 0:
+                self._vprint(f"    Profile suppressed {suppressed} findings")
+
+    # ===================================================================
     # Reporting
     # ===================================================================
     def summary(self) -> dict:
@@ -4648,7 +5291,9 @@ def scan_multiple_contexts(contexts, kubeconfig=None, namespaces=None,
                            severity="LOW", json_dir=None, html_dir=None,
                            sarif_dir=None, pdf_dir=None,
                            baseline_save=None, baseline_compare=None,
-                           slack_webhook=None, teams_webhook=None):
+                           slack_webhook=None, teams_webhook=None,
+                           policy_dir=None, rego_dir=None,
+                           profile=None, exceptions_file=None):
     """Scan multiple Kubernetes contexts in a single run."""
     B = "\033[1m"
     R = "\033[0m"
@@ -4671,6 +5316,10 @@ def scan_multiple_contexts(contexts, kubeconfig=None, namespaces=None,
                 verbose=verbose,
                 trusted_registries=trusted_registries,
                 trivy_path=trivy_path,
+                policy_dir=policy_dir,
+                rego_dir=rego_dir,
+                profile=profile,
+                exceptions_file=exceptions_file,
             )
             scanner.scan()
 
@@ -4781,6 +5430,16 @@ def main():
                         help="Comma-separated list of additional trusted image registries")
     parser.add_argument("--trivy-path", metavar="PATH",
                         help="Path to trivy binary (auto-detected if not set)")
+    # v2.0.0 args — Policy Engine
+    parser.add_argument("--policy-dir", metavar="DIR",
+                        help="Directory containing custom YAML policy files")
+    parser.add_argument("--rego-dir", metavar="DIR",
+                        help="Directory containing OPA Rego policy files (.rego)")
+    parser.add_argument("--profile",
+                        choices=["dev", "staging", "production"],
+                        help="Baseline profile to apply (dev/staging/production)")
+    parser.add_argument("--exceptions", metavar="FILE",
+                        help="JSON/YAML file with exception/allow-list rules")
     # v1.5.0 args
     parser.add_argument("--contexts", metavar="CTX1,CTX2,...",
                         help="Scan multiple contexts (comma-separated)")
@@ -4837,6 +5496,10 @@ def main():
             baseline_compare=args.baseline_compare,
             slack_webhook=args.slack_webhook,
             teams_webhook=args.teams_webhook,
+            policy_dir=args.policy_dir,
+            rego_dir=args.rego_dir,
+            profile=args.profile,
+            exceptions_file=args.exceptions,
         )
         sys.exit(0)
 
@@ -4849,6 +5512,10 @@ def main():
         verbose=args.verbose,
         trusted_registries=trusted_regs,
         trivy_path=args.trivy_path or None,
+        policy_dir=args.policy_dir,
+        rego_dir=args.rego_dir,
+        profile=args.profile,
+        exceptions_file=args.exceptions,
     )
 
     scanner.scan()

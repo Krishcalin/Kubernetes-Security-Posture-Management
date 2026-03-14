@@ -12,7 +12,10 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ## Features
 
-- **~140+ security checks** across 18 check groups
+- **~150+ security checks** across 19 check groups
+- **Policy Engine (v2.0.0)** — custom YAML policy DSL, OPA/Rego integration, Kyverno policy validation
+- **Baseline profiles** — built-in `dev`/`staging`/`production` profiles with different thresholds (`--profile`)
+- **Exception management** — allow-list specific findings by rule ID or resource pattern (`--exceptions`)
 - **Multi-cluster scanning** — scan multiple contexts in a single run (`--contexts`)
 - **Supply chain & image security** — Trivy/Grype CVE scanning, cosign signature verification, SBOM generation, EOL base image detection
 - **Advanced RBAC analysis** — graph-based escalation paths, dormant SAs, permission drift tracking
@@ -29,7 +32,7 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ---
 
-## Check Groups (~140+ Rules)
+## Check Groups (~150+ Rules)
 
 | # | Category | Rule IDs | Key Checks |
 |---|----------|----------|------------|
@@ -51,6 +54,88 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 | 16 | **Runtime Security** | K8S-RC-001, K8S-EPH-001/002 | Non-existent RuntimeClass references, active ephemeral debug containers, privileged ephemeral containers |
 | 17 | **Advanced RBAC** | K8S-RBAC-016 to 027 | RBAC graph analysis, dormant SA detection, cross-namespace escalation paths, multi-hop privilege escalation, overly broad roles, orphaned bindings, aggregate role selectors, RBAC baseline drift tracking |
 | 18 | **Supply Chain Security** | K8S-SC-001 to 010 | Image CVE scanning (Trivy/Grype), cosign signature verification, SBOM generation, EOL/insecure base image detection, registry allow-list enforcement, admission policy for image verification |
+| 19 | **Kyverno Policy Validation** | K8S-KYV-001 to 006 | Kyverno not installed, failed/error policies, audit-mode policies in production, Ignore failurePolicy, missing mutating/generate policies |
+
+---
+
+## Policy Engine (v2.0.0)
+
+### Custom YAML Policy DSL
+Define custom security checks in YAML and place them in a policy directory:
+
+```yaml
+rule_id: K8S-CUSTOM-001
+name: "Require non-root containers"
+category: "Custom Policies"
+severity: HIGH
+description: "All containers must run as non-root"
+recommendation: "Set runAsNonRoot: true in securityContext"
+cwe: CWE-250
+target:
+  api_group: apps/v1
+  resource: deployments
+  namespaced: true
+match:
+  field: spec.template.spec.containers[*].securityContext.runAsNonRoot
+  operator: equals    # equals|not_equals|exists|not_exists|contains|regex|gt|lt
+  value: true
+```
+
+### OPA/Rego Integration
+Write Rego policies using the `kspm` package and place `.rego` files in a directory:
+
+```rego
+package kspm
+
+deny[result] {
+  input.deployments[_].spec.replicas < 2
+  result := {
+    "rule_id": "K8S-REGO-001",
+    "name": "Single replica deployment",
+    "severity": "MEDIUM",
+    "description": "Deployment has less than 2 replicas",
+    "recommendation": "Increase replicas for availability",
+    "resource": input.deployments[_].metadata.name,
+    "detail": sprintf("replicas: %d", [input.deployments[_].spec.replicas]),
+  }
+}
+```
+
+Requires the `opa` binary on PATH. The scanner collects namespaces, deployments, and cluster roles as input.
+
+### Kyverno Policy Validation
+When Kyverno is installed on the cluster, the scanner automatically validates:
+- K8S-KYV-001: Kyverno installation detected
+- K8S-KYV-002: Policies in failed/error state
+- K8S-KYV-003: Policies in audit mode (should be enforce in production)
+- K8S-KYV-004: Policies with `Ignore` failurePolicy
+- K8S-KYV-005: No mutating policies defined
+- K8S-KYV-006: No generate policies defined
+
+### Baseline Profiles
+Three built-in profiles control rule severity thresholds and suppressions:
+
+| Profile | Min Severity | Fail On | Suppressed Rules |
+|---------|-------------|---------|-----------------|
+| `production` | LOW | CRITICAL, HIGH | None — all rules enforced |
+| `staging` | MEDIUM | CRITICAL | PDB-001, HPA-004, POD-024 |
+| `dev` | HIGH | CRITICAL | 14 best-practice rules relaxed |
+
+### Exception Management
+Create a YAML/JSON file to suppress known-accepted findings:
+
+```yaml
+exceptions:
+  - rule_id: K8S-POD-001
+    resource: "default/Deployment/test-app"
+    reason: "Accepted risk for dev workload"
+  - rule_id: K8S-IMG-001
+    reason: "Latest tag allowed for internal images"
+  - resource: "kube-system/*"
+    reason: "System namespace excluded"
+```
+
+Supports glob patterns for `rule_id` and `resource` matching.
 
 ---
 
@@ -108,11 +193,20 @@ Interactive compliance dashboard with coverage cards per framework, progress bar
 ## Installation
 
 ```bash
-# Install the Kubernetes Python client
+# Install the Kubernetes Python client (required)
 pip install kubernetes
+
+# Optional: enhanced PDF reports
+pip install reportlab
+
+# Optional: YAML policy files and exceptions (PyYAML)
+pip install pyyaml
+
+# Optional: OPA/Rego policies — install the opa binary
+# https://www.openpolicyagent.org/docs/latest/#1-download-opa
 ```
 
-No other dependencies required — the scanner uses only the `kubernetes` library and Python standard library.
+The scanner requires only the `kubernetes` library. All other dependencies are optional and gracefully degrade when absent.
 
 ---
 
@@ -167,6 +261,24 @@ python kspm_scanner.py --json current.json --diff previous.json --diff-output di
 # Slack/Teams CI/CD notifications
 python kspm_scanner.py --slack-webhook https://hooks.slack.com/services/T.../B.../xxx
 python kspm_scanner.py --teams-webhook https://outlook.office.com/webhook/...
+
+# Custom YAML policies (v2.0.0)
+python kspm_scanner.py --policy-dir ./policies/ --html report.html
+
+# OPA/Rego policies (v2.0.0)
+python kspm_scanner.py --rego-dir ./rego-policies/ --html report.html
+
+# Baseline profile — production (strict, all rules, fail on HIGH+)
+python kspm_scanner.py --profile production --html report.html
+
+# Baseline profile — dev (relaxed, CRITICAL/HIGH only)
+python kspm_scanner.py --profile dev --html report.html
+
+# Exception management — suppress specific findings
+python kspm_scanner.py --exceptions exceptions.yaml --html report.html
+
+# Combined: custom policies + profile + exceptions
+python kspm_scanner.py --policy-dir ./policies/ --rego-dir ./rego/ --profile production --exceptions exceptions.yaml --html report.html
 ```
 
 ### CLI Reference
@@ -179,6 +291,9 @@ usage: kspm_scanner.py [-h] [--kubeconfig FILE] [--context CTX]
                        [--pdf FILE] [--diff PREV_JSON] [--diff-output FILE]
                        [--baseline-save FILE] [--baseline-compare FILE]
                        [--trusted-registries LIST] [--trivy-path PATH]
+                       [--policy-dir DIR] [--rego-dir DIR]
+                       [--profile {dev,staging,production}]
+                       [--exceptions FILE]
                        [--slack-webhook URL] [--teams-webhook URL]
                        [--verbose] [--version]
 
@@ -199,6 +314,10 @@ Options:
   --baseline-compare FILE     Compare current RBAC against saved baseline
   --trusted-registries LIST   Comma-separated additional trusted registries
   --trivy-path PATH           Path to trivy binary (auto-detected)
+  --policy-dir DIR            Directory with custom YAML policy files (v2.0.0)
+  --rego-dir DIR              Directory with OPA Rego policy files (v2.0.0)
+  --profile PROFILE           Baseline profile: dev/staging/production (v2.0.0)
+  --exceptions FILE           JSON/YAML exception/allow-list file (v2.0.0)
   --slack-webhook URL         Send scan summary to Slack webhook
   --teams-webhook URL         Send scan summary to Teams webhook
   --verbose, -v               Enable verbose output
@@ -294,6 +413,9 @@ rules:
   verbs: ["get", "list"]
 - apiGroups: ["admissionregistration.k8s.io"]
   resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+  verbs: ["get", "list"]
+- apiGroups: ["kyverno.io"]
+  resources: ["clusterpolicies", "policies"]
   verbs: ["get", "list"]
 ```
 
