@@ -4,7 +4,7 @@
 
 - **Repository**: `Kubernetes-Security-Posture-Management`
 - **Scanner file**: `kspm_scanner.py`
-- **Version**: 1.3.0
+- **Version**: 1.4.0
 - **Language**: Python 3.8+
 - **Dependency**: `kubernetes` (Python client for Kubernetes API)
 - **Type**: Agentless live-cluster scanner — queries the Kubernetes API via kubeconfig or in-cluster config
@@ -34,7 +34,8 @@ Finding class  →  KSPMScanner class  →  CLI (argparse)
                     ├── _check_service_mesh()          [v1.1.0]
                     ├── _check_deprecated_apis()       [v1.1.0]
                     ├── _check_runtime_security()      [v1.1.0]
-                    └── _check_advanced_rbac()         [v1.3.0]
+                    ├── _check_advanced_rbac()         [v1.3.0]
+                    └── _check_supply_chain()          [v1.4.0]
 ```
 
 ### Key Design Decisions
@@ -70,6 +71,7 @@ Format: `K8S-{CATEGORY}-{NNN}`
 | K8S-API | Deprecated APIs | 3 |
 | K8S-RC | Runtime Classes | 1 |
 | K8S-EPH | Ephemeral Containers | 2 |
+| K8S-SC | Supply Chain Security | 10 |
 
 ### Severity Model
 
@@ -159,12 +161,14 @@ python kspm_scanner.py --context kind-kind
 - [x] **Permission drift tracking** (K8S-RBAC-025/026/027): `--baseline-save` / `--baseline-compare` CLI for RBAC state diff
 - [x] **ClusterRole reuse analysis** (K8S-RBAC-021): ClusterRoles bound in 3+ namespaces via RoleBindings
 
-### v1.4.0 — Supply Chain & Image Security
-- [ ] **Image vulnerability scanning**: Integrate with Trivy/Grype for CVE scanning
-- [ ] **SBOM generation**: Software Bill of Materials for container images
-- [ ] **Signature verification**: Check for cosign/notary image signatures
-- [ ] **Registry allow-list enforcement**: Configurable trusted registry list
-- [ ] **Base image analysis**: Flag images based on known-insecure base images
+### v1.4.0 — Supply Chain & Image Security (COMPLETE)
+- [x] **Image vulnerability scanning**: Integrate with Trivy/Grype for CVE scanning (K8S-SC-006/007)
+- [x] **SBOM generation**: Software Bill of Materials via Trivy/Syft (K8S-SC-003/009)
+- [x] **Signature verification**: cosign image signature verification (K8S-SC-008)
+- [x] **Registry allow-list enforcement**: Configurable trusted registry list via `--trusted-registries` (K8S-SC-005)
+- [x] **Base image analysis**: EOL/insecure base image detection with 34 known entries (K8S-SC-004)
+- [x] **Admission policy check**: Verify image verification webhook exists (K8S-SC-010)
+- [x] **Tool availability checks**: Detect missing Trivy/Grype/cosign/Syft (K8S-SC-001/002/003)
 
 ### v1.5.0 — Multi-Cluster & Reporting
 - [ ] **Multi-cluster scanning**: Scan multiple contexts in a single run

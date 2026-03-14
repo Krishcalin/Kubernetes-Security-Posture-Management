@@ -12,7 +12,8 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ## Features
 
-- **~130+ security checks** across 17 check groups
+- **~140+ security checks** across 18 check groups
+- **Supply chain & image security** — Trivy/Grype CVE scanning, cosign signature verification, SBOM generation, EOL base image detection
 - **Advanced RBAC analysis** — graph-based escalation paths, dormant SAs, permission drift tracking
 - **RBAC baseline drift** — save & compare RBAC state across scans (`--baseline-save`/`--baseline-compare`)
 - **6 compliance frameworks** — CIS Benchmark, NSA/CISA, MITRE ATT&CK, SOC 2, PCI-DSS, NIST 800-190
@@ -25,7 +26,7 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ---
 
-## Check Groups (~130+ Rules)
+## Check Groups (~140+ Rules)
 
 | # | Category | Rule IDs | Key Checks |
 |---|----------|----------|------------|
@@ -46,6 +47,7 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 | 15 | **Deprecated APIs** | K8S-API-001 to 003 | Deprecated API versions in use, removed APIs still present, PodSecurityPolicy remnants |
 | 16 | **Runtime Security** | K8S-RC-001, K8S-EPH-001/002 | Non-existent RuntimeClass references, active ephemeral debug containers, privileged ephemeral containers |
 | 17 | **Advanced RBAC** | K8S-RBAC-016 to 027 | RBAC graph analysis, dormant SA detection, cross-namespace escalation paths, multi-hop privilege escalation, overly broad roles, orphaned bindings, aggregate role selectors, RBAC baseline drift tracking |
+| 18 | **Supply Chain Security** | K8S-SC-001 to 010 | Image CVE scanning (Trivy/Grype), cosign signature verification, SBOM generation, EOL/insecure base image detection, registry allow-list enforcement, admission policy for image verification |
 
 ---
 
@@ -140,6 +142,12 @@ python kspm_scanner.py --baseline-save rbac-baseline.json
 
 # Compare against a saved baseline (detects permission drift)
 python kspm_scanner.py --baseline-compare rbac-baseline.json --html report.html
+
+# Supply chain scan with Trivy CVE scanning and trusted registries
+python kspm_scanner.py --trusted-registries "harbor.corp.io,ecr.us-east-1.amazonaws.com" --html report.html
+
+# Specify custom Trivy path
+python kspm_scanner.py --trivy-path /usr/local/bin/trivy --html report.html
 ```
 
 ### CLI Reference
@@ -149,18 +157,24 @@ usage: kspm_scanner.py [-h] [--kubeconfig FILE] [--context CTX]
                        [--namespace NS] [--all-namespaces]
                        [--severity {CRITICAL,HIGH,MEDIUM,LOW}]
                        [--json FILE] [--html FILE]
+                       [--baseline-save FILE] [--baseline-compare FILE]
+                       [--trusted-registries LIST] [--trivy-path PATH]
                        [--verbose] [--version]
 
 Options:
-  --kubeconfig, -k FILE   Path to kubeconfig file (env: KUBECONFIG)
-  --context, -c CTX       Kubernetes context to use (env: K8S_CONTEXT)
-  --namespace, -n NS      Scan specific namespace(s), comma-separated
-  --all-namespaces, -A    Scan all namespaces (default)
-  --severity LEVEL        Minimum severity to report (default: LOW)
-  --json FILE             Save JSON report to FILE
-  --html FILE             Save interactive HTML report to FILE
-  --verbose, -v           Enable verbose output
-  --version               Show version and exit
+  --kubeconfig, -k FILE       Path to kubeconfig file (env: KUBECONFIG)
+  --context, -c CTX           Kubernetes context to use (env: K8S_CONTEXT)
+  --namespace, -n NS          Scan specific namespace(s), comma-separated
+  --all-namespaces, -A        Scan all namespaces (default)
+  --severity LEVEL            Minimum severity to report (default: LOW)
+  --json FILE                 Save JSON report to FILE
+  --html FILE                 Save interactive HTML report to FILE
+  --baseline-save FILE        Save current RBAC state as baseline
+  --baseline-compare FILE     Compare current RBAC against saved baseline
+  --trusted-registries LIST   Comma-separated additional trusted registries
+  --trivy-path PATH           Path to trivy binary (auto-detected)
+  --verbose, -v               Enable verbose output
+  --version                   Show version and exit
 ```
 
 ### Environment Variables

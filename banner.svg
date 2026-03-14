@@ -189,12 +189,12 @@
   <!-- Pill 1: Rules -->
   <g transform="translate(310, 265)">
     <rect x="0" y="0" width="100" height="30" rx="15" fill="#326ce5" opacity="0.2" stroke="#326ce5" stroke-width="0.8"/>
-    <text x="50" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">130+ Rules</text>
+    <text x="50" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">140+ Rules</text>
   </g>
   <!-- Pill 2: Checks -->
   <g transform="translate(422, 265)">
     <rect x="0" y="0" width="120" height="30" rx="15" fill="#326ce5" opacity="0.2" stroke="#326ce5" stroke-width="0.8"/>
-    <text x="60" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">17 Check Groups</text>
+    <text x="60" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">18 Check Groups</text>
   </g>
   <!-- Pill 3: Compliance -->
   <g transform="translate(554, 265)">
@@ -228,6 +228,8 @@
     <text x="465" y="0">APIs</text>
     <text x="469" y="0" fill="#3a5070"> | </text>
     <text x="505" y="0">Runtime</text>
+    <text x="509" y="0" fill="#3a5070"> | </text>
+    <text x="565" y="0">Supply Chain</text>
   </g>
 
   <!-- Severity indicator dots (bottom right area) -->
@@ -256,7 +258,7 @@
   <!-- Version badge (bottom right) -->
   <g transform="translate(1020, 280)">
     <rect x="0" y="0" width="70" height="26" rx="6" fill="#326ce5" opacity="0.2" stroke="#326ce5" stroke-width="0.8"/>
-    <text x="35" y="17" font-family="'Segoe UI',Arial,sans-serif" font-size="11" font-weight="600" fill="#89b4fa" text-anchor="middle">v1.3.0</text>
+    <text x="35" y="17" font-family="'Segoe UI',Arial,sans-serif" font-size="11" font-weight="600" fill="#89b4fa" text-anchor="middle">v1.4.0</text>
   </g>
 
   <!-- Top-right corner accent -->

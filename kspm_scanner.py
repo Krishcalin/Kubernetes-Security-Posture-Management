@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kubernetes Security Posture Management (KSPM) Scanner  v1.3.0
+Kubernetes Security Posture Management (KSPM) Scanner  v1.4.0
 
 Agentless scanner that connects to a live Kubernetes cluster via the
 Kubernetes API and performs comprehensive security posture checks covering
@@ -20,9 +20,9 @@ Usage:
                            [--verbose] [--version]
 """
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
-import os, sys, json, re, argparse, html as html_mod
+import os, sys, json, re, argparse, html as html_mod, subprocess, shutil
 from datetime import datetime, timezone
 
 try:
@@ -47,6 +47,42 @@ TRUSTED_REGISTRIES = {
 }
 
 SYSTEM_NAMESPACES = {"kube-system", "kube-public", "kube-node-lease", "default"}
+
+# Known insecure / EOL base images (v1.4.0)
+INSECURE_BASE_IMAGES = {
+    "python:2": "Python 2 is EOL since Jan 2020",
+    "python:2.7": "Python 2.7 is EOL since Jan 2020",
+    "node:8": "Node.js 8 is EOL since Dec 2019",
+    "node:10": "Node.js 10 is EOL since Apr 2021",
+    "node:12": "Node.js 12 is EOL since Apr 2022",
+    "node:14": "Node.js 14 is EOL since Apr 2023",
+    "node:15": "Node.js 15 is EOL since Jun 2021",
+    "ubuntu:14.04": "Ubuntu 14.04 (Trusty) is EOL since Apr 2019",
+    "ubuntu:16.04": "Ubuntu 16.04 (Xenial) is EOL since Apr 2021",
+    "ubuntu:18.04": "Ubuntu 18.04 (Bionic) is EOL since Jun 2023",
+    "debian:8": "Debian 8 (Jessie) is EOL since Jun 2020",
+    "debian:9": "Debian 9 (Stretch) is EOL since Jun 2022",
+    "centos:6": "CentOS 6 is EOL since Nov 2020",
+    "centos:7": "CentOS 7 is EOL since Jun 2024",
+    "centos:8": "CentOS 8 is EOL since Dec 2021",
+    "alpine:3.12": "Alpine 3.12 is EOL since May 2022",
+    "alpine:3.13": "Alpine 3.13 is EOL since Nov 2022",
+    "alpine:3.14": "Alpine 3.14 is EOL since May 2023",
+    "golang:1.16": "Go 1.16 is EOL",
+    "golang:1.17": "Go 1.17 is EOL",
+    "golang:1.18": "Go 1.18 is EOL",
+    "golang:1.19": "Go 1.19 is EOL",
+    "ruby:2.5": "Ruby 2.5 is EOL since Mar 2021",
+    "ruby:2.6": "Ruby 2.6 is EOL since Mar 2022",
+    "ruby:2.7": "Ruby 2.7 is EOL since Mar 2023",
+    "php:7.3": "PHP 7.3 is EOL since Dec 2021",
+    "php:7.4": "PHP 7.4 is EOL since Nov 2022",
+    "php:8.0": "PHP 8.0 is EOL since Nov 2023",
+    "openjdk:8": "OpenJDK 8 is in extended EOL",
+    "openjdk:11": "OpenJDK 11 commercial support ending",
+    "nginx:1.18": "Nginx 1.18 is EOL",
+    "nginx:1.20": "Nginx 1.20 is EOL",
+}
 
 # High-risk RBAC verbs
 DANGEROUS_VERBS = {"create", "update", "patch", "delete", "deletecollection", "escalate", "bind", "impersonate"}
@@ -203,6 +239,10 @@ class KSPMScanner:
         "K8S-PDB-001": "CIS 5.7.4",
         # v1.3.0 additions
         "K8S-RBAC-016": "CIS 5.1.6", "K8S-RBAC-020": "CIS 5.1.3",
+        # v1.4.0 — Supply Chain & Image Security
+        "K8S-SC-004": "CIS 5.5.1",  "K8S-SC-006": "CIS 5.5.1",
+        "K8S-SC-007": "CIS 5.5.1",  "K8S-SC-008": "CIS 5.5.1",
+        "K8S-SC-010": "CIS 5.5.1",
     }
 
     # NSA/CISA Kubernetes Hardening Guide (v1.2, Aug 2022) mapping
@@ -258,6 +298,10 @@ class KSPMScanner:
         "K8S-RBAC-018": "NSA 3.4",  "K8S-RBAC-019": "NSA 3.4",
         "K8S-RBAC-020": "NSA 3.2",  "K8S-RBAC-022": "NSA 3.1",
         "K8S-RBAC-025": "NSA 3.1",  "K8S-RBAC-027": "NSA 3.1",
+        # v1.4.0 — Supply Chain & Image Security
+        "K8S-SC-004": "NSA 1.10",  "K8S-SC-005": "NSA 1.11",
+        "K8S-SC-006": "NSA 1.10",  "K8S-SC-007": "NSA 1.10",
+        "K8S-SC-008": "NSA 1.11",  "K8S-SC-010": "NSA 1.11",
     }
 
     # MITRE ATT&CK for Containers mapping
@@ -322,6 +366,12 @@ class KSPMScanner:
         "K8S-RBAC-019": "T1611",      # Multi-hop escalation
         "K8S-RBAC-025": "T1098",      # Account Manipulation (drift)
         "K8S-RBAC-027": "T1098",      # Permission expansion (drift)
+        # v1.4.0 — Supply Chain & Image Security
+        "K8S-SC-004": "T1525",        # Implant Internal Image (EOL base)
+        "K8S-SC-006": "T1525",        # Supply chain compromise (critical CVEs)
+        "K8S-SC-007": "T1525",        # Supply chain compromise (high CVEs)
+        "K8S-SC-008": "T1195.002",    # Supply Chain Compromise: Software Supply Chain
+        "K8S-SC-010": "T1195.002",    # No admission policy for image verification
     }
 
     # SOC 2 Trust Service Criteria mapping
@@ -375,6 +425,10 @@ class KSPMScanner:
         "K8S-RBAC-023": "CC6.1", "K8S-RBAC-024": "CC6.1",
         "K8S-RBAC-025": "CC7.2", "K8S-RBAC-026": "CC7.2",
         "K8S-RBAC-027": "CC7.2",
+        # v1.4.0 — Supply Chain & Image Security
+        "K8S-SC-004": "CC8.1",  "K8S-SC-005": "CC6.8",
+        "K8S-SC-006": "CC8.1",  "K8S-SC-007": "CC8.1",
+        "K8S-SC-008": "CC8.1",  "K8S-SC-010": "CC8.1",
     }
 
     # PCI-DSS v4.0 requirement mapping
@@ -419,6 +473,10 @@ class KSPMScanner:
         "K8S-RBAC-018": "PCI 7.2.4", "K8S-RBAC-019": "PCI 7.2.4",
         "K8S-RBAC-020": "PCI 7.2.2", "K8S-RBAC-022": "PCI 7.2.1",
         "K8S-RBAC-025": "PCI 10.2.1", "K8S-RBAC-027": "PCI 10.2.1",
+        # v1.4.0 — Supply Chain & Image Security
+        "K8S-SC-004": "PCI 6.3.1",  "K8S-SC-005": "PCI 6.3.2",
+        "K8S-SC-006": "PCI 6.3.1",  "K8S-SC-007": "PCI 6.3.1",
+        "K8S-SC-008": "PCI 6.3.2",  "K8S-SC-010": "PCI 6.3.2",
     }
 
     # NIST SP 800-190 (Application Container Security Guide) mapping
@@ -459,10 +517,15 @@ class KSPMScanner:
         "K8S-RBAC-016": "NIST 3.3.5", "K8S-RBAC-017": "NIST 3.3.5",
         "K8S-RBAC-018": "NIST 3.3.5", "K8S-RBAC-019": "NIST 3.3.5",
         "K8S-RBAC-020": "NIST 3.3.5", "K8S-RBAC-022": "NIST 3.3.5",
+        # v1.4.0 — Supply Chain & Image Security
+        "K8S-SC-004": "NIST 3.1.1",  "K8S-SC-005": "NIST 3.2.1",
+        "K8S-SC-006": "NIST 3.1.1",  "K8S-SC-007": "NIST 3.1.1",
+        "K8S-SC-008": "NIST 3.2.1",  "K8S-SC-010": "NIST 3.2.1",
     }
 
     def __init__(self, kubeconfig=None, context=None, namespaces=None,
-                 all_namespaces=True, verbose=False):
+                 all_namespaces=True, verbose=False,
+                 trusted_registries=None, trivy_path=None):
         self.findings: list = []
         self.verbose = verbose
         self.kubeconfig = kubeconfig
@@ -470,6 +533,8 @@ class KSPMScanner:
         self.target_namespaces = namespaces   # list or None
         self.all_namespaces = all_namespaces
         self.cluster_name = context or "default"
+        self.trusted_registries = trusted_registries or set()
+        self.trivy_path = trivy_path  # path to trivy binary (auto-detect if None)
 
         # Load kube config
         try:
@@ -619,6 +684,8 @@ class KSPMScanner:
         self._check_runtime_security()
         # v1.3.0 check groups
         self._check_advanced_rbac()
+        # v1.4.0 check groups
+        self._check_supply_chain()
 
         print(f"[*] Scan complete. {len(self.findings)} findings identified.")
 
@@ -1275,7 +1342,8 @@ class KSPMScanner:
             else:
                 registry = "docker.io"  # default Docker Hub
 
-            if registry and "." in registry and registry not in TRUSTED_REGISTRIES:
+            all_trusted = TRUSTED_REGISTRIES | self.trusted_registries
+            if registry and "." in registry and registry not in all_trusted:
                 self._add(Finding(
                     "K8S-IMG-005", "Image from non-standard registry", "Image Security",
                     "MEDIUM", ctr_path, None, f"registry: {registry}",
@@ -3326,6 +3394,350 @@ class KSPMScanner:
         print(f"[*] Baseline comparison complete (baseline from: {gen})")
 
     # ===================================================================
+    # CHECK GROUP 18: Supply Chain & Image Security (v1.4.0)
+    # K8S-SC-001 to SC-010
+    # ===================================================================
+    def _check_supply_chain(self):
+        self._vprint("  [*] Checking supply chain & image security ...")
+
+        # --- Discover tool availability ---
+        trivy_bin = self.trivy_path or shutil.which("trivy")
+        grype_bin = shutil.which("grype")
+        cosign_bin = shutil.which("cosign")
+        syft_bin = shutil.which("syft")
+
+        has_trivy = trivy_bin is not None
+        has_grype = grype_bin is not None
+        has_cosign = cosign_bin is not None
+        has_syft = syft_bin is not None
+
+        self._vprint(f"    trivy={has_trivy}  grype={has_grype}  cosign={has_cosign}  syft={has_syft}")
+
+        # K8S-SC-001: No vulnerability scanner available
+        if not has_trivy and not has_grype:
+            self._add(Finding(
+                "K8S-SC-001", "No image vulnerability scanner available",
+                "Supply Chain Security", "MEDIUM",
+                "cluster/ToolChain/scanner-host", None,
+                "trivy: not found, grype: not found",
+                "Neither Trivy nor Grype is installed on the scanner host. "
+                "Image CVE scanning cannot be performed.",
+                "Install Trivy (https://trivy.dev) or Grype (https://github.com/anchore/grype) "
+                "for automated image vulnerability scanning.",
+            ))
+
+        # K8S-SC-002: No signature verifier available
+        if not has_cosign:
+            self._add(Finding(
+                "K8S-SC-002", "No image signature verifier available",
+                "Supply Chain Security", "LOW",
+                "cluster/ToolChain/scanner-host", None,
+                "cosign: not found",
+                "Cosign is not installed. Image signature verification cannot be performed.",
+                "Install cosign (https://docs.sigstore.dev/cosign) for image provenance verification.",
+            ))
+
+        # K8S-SC-003: No SBOM generator available
+        if not has_trivy and not has_syft:
+            self._add(Finding(
+                "K8S-SC-003", "No SBOM generator available",
+                "Supply Chain Security", "LOW",
+                "cluster/ToolChain/scanner-host", None,
+                "trivy: not found, syft: not found",
+                "Neither Trivy nor Syft is installed. SBOM generation is unavailable.",
+                "Install Trivy or Syft (https://github.com/anchore/syft) for SBOM generation.",
+            ))
+
+        # --- Collect unique images from all workloads ---
+        namespaces = self._get_namespaces()
+        image_map = {}  # image_ref -> list of (ns, kind, name) using it
+
+        for ns in namespaces:
+            workloads = []
+            try:
+                for d in self.apps_v1.list_namespaced_deployment(ns).items:
+                    workloads.append(("Deployment", d.metadata.name, ns, d.spec.template.spec))
+            except ApiException:
+                pass
+            try:
+                for s in self.apps_v1.list_namespaced_stateful_set(ns).items:
+                    workloads.append(("StatefulSet", s.metadata.name, ns, s.spec.template.spec))
+            except ApiException:
+                pass
+            try:
+                for ds in self.apps_v1.list_namespaced_daemon_set(ns).items:
+                    workloads.append(("DaemonSet", ds.metadata.name, ns, ds.spec.template.spec))
+            except ApiException:
+                pass
+
+            for kind, wl_name, wl_ns, pod_spec in workloads:
+                if not pod_spec:
+                    continue
+                all_ctrs = list(pod_spec.containers or []) + list(pod_spec.init_containers or [])
+                for ctr in all_ctrs:
+                    img = ctr.image or ""
+                    if img:
+                        image_map.setdefault(img, []).append((wl_ns, kind, wl_name))
+
+        unique_images = set(image_map.keys())
+        self._vprint(f"    Unique images found: {len(unique_images)}")
+
+        # --- K8S-SC-004: Insecure / EOL base image ---
+        for image_ref in sorted(unique_images):
+            img_no_digest = image_ref.split("@")[0]
+            # Try exact match first, then prefix match
+            for pattern, reason in INSECURE_BASE_IMAGES.items():
+                # Match "python:2" against "python:2", "python:2-slim", etc.
+                if img_no_digest == pattern or img_no_digest.startswith(pattern + "-"):
+                    loc = image_map[image_ref][0]
+                    res_path = self._res_path(loc[0], loc[1], loc[2])
+                    workload_count = len(image_map[image_ref])
+                    count_note = f" (used by {workload_count} workloads)" if workload_count > 1 else ""
+                    self._add(Finding(
+                        "K8S-SC-004", "Insecure/EOL base image detected",
+                        "Supply Chain Security", "HIGH",
+                        res_path, None,
+                        f"image: {image_ref}{count_note}",
+                        f"{reason}. Running EOL images means no security patches, "
+                        f"leaving known vulnerabilities unpatched.",
+                        "Upgrade to a supported base image version with active security updates.",
+                        "CWE-1104",
+                    ))
+                    break
+
+        # --- K8S-SC-005: Registry allow-list enforcement ---
+        if self.trusted_registries:
+            all_trusted = TRUSTED_REGISTRIES | self.trusted_registries
+            for image_ref in sorted(unique_images):
+                img_no_digest = image_ref.split("@")[0]
+                img_no_tag = img_no_digest.split(":")[0]
+                if "/" in img_no_tag:
+                    registry = img_no_tag.split("/")[0]
+                else:
+                    registry = "docker.io"
+                if registry and "." in registry and registry not in all_trusted:
+                    loc = image_map[image_ref][0]
+                    res_path = self._res_path(loc[0], loc[1], loc[2])
+                    self._add(Finding(
+                        "K8S-SC-005", "Image from untrusted registry (allow-list)",
+                        "Supply Chain Security", "HIGH",
+                        res_path, None,
+                        f"registry: {registry} | image: {image_ref}",
+                        f"Image pulled from '{registry}' which is not in the configured "
+                        f"trusted registry allow-list.",
+                        "Use images from approved registries or update the --trusted-registries list.",
+                        "CWE-829",
+                    ))
+
+        # --- K8S-SC-006: Image vulnerability scanning (Trivy/Grype) ---
+        scanned_images = set()
+        vuln_scanner_bin = trivy_bin or grype_bin
+        vuln_scanner_name = "trivy" if trivy_bin else "grype"
+
+        if vuln_scanner_bin and unique_images:
+            # Limit scanning to avoid long runtimes
+            scan_limit = 20
+            images_to_scan = sorted(unique_images)[:scan_limit]
+            if len(unique_images) > scan_limit:
+                self._vprint(f"    Limiting CVE scan to first {scan_limit} of {len(unique_images)} images")
+
+            for image_ref in images_to_scan:
+                try:
+                    if trivy_bin:
+                        cmd = [trivy_bin, "image", "--severity",
+                               "CRITICAL,HIGH", "--format", "json",
+                               "--quiet", "--timeout", "120s", image_ref]
+                    else:
+                        cmd = [grype_bin, image_ref, "-o", "json",
+                               "--only-fixed", "--fail-on", "low"]
+
+                    self._vprint(f"    Scanning: {image_ref}")
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=180,
+                    )
+                    scanned_images.add(image_ref)
+
+                    if result.returncode != 0 and not result.stdout:
+                        self._vprint(f"    [!] {vuln_scanner_name} error for {image_ref}: "
+                                     f"{result.stderr[:200]}")
+                        continue
+
+                    vuln_data = json.loads(result.stdout) if result.stdout.strip() else {}
+                    vulns = self._extract_vulns(vuln_data, vuln_scanner_name)
+
+                    if vulns:
+                        critical_count = sum(1 for v in vulns if v["severity"] == "CRITICAL")
+                        high_count = sum(1 for v in vulns if v["severity"] == "HIGH")
+                        cve_list = [v["id"] for v in vulns[:10]]
+                        cve_str = ", ".join(cve_list)
+                        if len(vulns) > 10:
+                            cve_str += f" ... +{len(vulns) - 10} more"
+
+                        loc = image_map[image_ref][0]
+                        res_path = self._res_path(loc[0], loc[1], loc[2])
+
+                        if critical_count > 0:
+                            self._add(Finding(
+                                "K8S-SC-006",
+                                "Critical vulnerabilities in container image",
+                                "Supply Chain Security", "CRITICAL",
+                                res_path, None,
+                                f"image: {image_ref} | critical={critical_count} high={high_count}",
+                                f"Image contains {critical_count} CRITICAL and {high_count} HIGH "
+                                f"vulnerabilities. CVEs: {cve_str}",
+                                "Update the base image and packages to patch known CVEs. "
+                                "Rebuild and redeploy the image.",
+                                "CWE-1395",
+                            ))
+                        elif high_count > 0:
+                            self._add(Finding(
+                                "K8S-SC-007",
+                                "High vulnerabilities in container image",
+                                "Supply Chain Security", "HIGH",
+                                res_path, None,
+                                f"image: {image_ref} | high={high_count}",
+                                f"Image contains {high_count} HIGH vulnerabilities. CVEs: {cve_str}",
+                                "Update the base image and packages to patch known CVEs.",
+                                "CWE-1395",
+                            ))
+                except subprocess.TimeoutExpired:
+                    self._vprint(f"    [!] Timeout scanning {image_ref}")
+                except (json.JSONDecodeError, OSError) as exc:
+                    self._vprint(f"    [!] Error scanning {image_ref}: {exc}")
+
+        # --- K8S-SC-008: Image signature verification (cosign) ---
+        if has_cosign and unique_images:
+            unsigned_count = 0
+            unsigned_examples = []
+            scan_limit = 20
+            images_to_verify = sorted(unique_images)[:scan_limit]
+
+            for image_ref in images_to_verify:
+                try:
+                    result = subprocess.run(
+                        [cosign_bin, "verify", "--certificate-identity-regexp", ".*",
+                         "--certificate-oidc-issuer-regexp", ".*", image_ref],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode != 0:
+                        unsigned_count += 1
+                        if len(unsigned_examples) < 5:
+                            unsigned_examples.append(image_ref)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+
+            if unsigned_count > 0:
+                examples = ", ".join(unsigned_examples)
+                if unsigned_count > 5:
+                    examples += f" ... +{unsigned_count - 5} more"
+                self._add(Finding(
+                    "K8S-SC-008", "Container images without signatures",
+                    "Supply Chain Security", "MEDIUM",
+                    "cluster/Images/unsigned", None,
+                    f"unsigned: {unsigned_count}/{len(images_to_verify)} | examples: {examples}",
+                    f"{unsigned_count} of {len(images_to_verify)} scanned images have no "
+                    f"verifiable cosign signature. Image provenance cannot be validated.",
+                    "Sign container images with cosign during CI/CD and enforce signature "
+                    "verification via admission controllers (e.g., Kyverno, OPA/Gatekeeper).",
+                    "CWE-345",
+                ))
+
+        # --- K8S-SC-009: SBOM availability check ---
+        if (has_trivy or has_syft) and unique_images:
+            sbom_tool = trivy_bin if has_trivy else syft_bin
+            sbom_tool_name = "trivy" if has_trivy else "syft"
+            sample_image = sorted(unique_images)[0]
+            try:
+                if sbom_tool_name == "trivy":
+                    cmd = [sbom_tool, "image", "--format", "cyclonedx",
+                           "--quiet", "--timeout", "120s", sample_image]
+                else:
+                    cmd = [sbom_tool, sample_image, "-o", "cyclonedx-json"]
+
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=180,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    sbom_data = json.loads(result.stdout)
+                    comp_count = len(sbom_data.get("components", []))
+                    self._vprint(f"    SBOM for {sample_image}: {comp_count} components")
+                else:
+                    self._vprint(f"    [!] SBOM generation failed for {sample_image}")
+            except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
+                self._vprint(f"    [!] SBOM generation error: {exc}")
+
+        # --- K8S-SC-010: No admission policy enforcing image verification ---
+        has_image_policy = False
+        try:
+            vwhs = self.admreg_v1.list_validating_webhook_configuration().items
+            for wh in vwhs:
+                wh_name = (wh.metadata.name or "").lower()
+                if any(kw in wh_name for kw in (
+                    "cosign", "sigstore", "notary", "connaisseur",
+                    "kyverno", "gatekeeper", "image-policy",
+                    "image-verification",
+                )):
+                    has_image_policy = True
+                    break
+        except ApiException:
+            pass
+
+        if not has_image_policy:
+            try:
+                mwhs = self.admreg_v1.list_mutating_webhook_configuration().items
+                for wh in mwhs:
+                    wh_name = (wh.metadata.name or "").lower()
+                    if any(kw in wh_name for kw in (
+                        "cosign", "sigstore", "notary", "connaisseur",
+                        "kyverno", "image-policy", "image-verification",
+                    )):
+                        has_image_policy = True
+                        break
+            except ApiException:
+                pass
+
+        if not has_image_policy:
+            self._add(Finding(
+                "K8S-SC-010",
+                "No admission policy enforcing image signature verification",
+                "Supply Chain Security", "HIGH",
+                "cluster/AdmissionControl/image-policy", None,
+                "ValidatingWebhookConfiguration / MutatingWebhookConfiguration: "
+                "no image verification webhook found",
+                "No admission controller is configured to enforce image signature verification. "
+                "Unsigned or tampered images can be deployed without restriction.",
+                "Deploy an image verification admission controller such as Kyverno "
+                "(verifyImages), OPA/Gatekeeper with cosign, or Connaisseur.",
+                "CWE-345",
+            ))
+
+    def _extract_vulns(self, data: dict, scanner: str) -> list:
+        """Extract vulnerability list from Trivy or Grype JSON output."""
+        vulns = []
+        if scanner == "trivy":
+            for result in data.get("Results", []):
+                for v in result.get("Vulnerabilities", []):
+                    vulns.append({
+                        "id": v.get("VulnerabilityID", ""),
+                        "severity": v.get("Severity", "UNKNOWN").upper(),
+                        "pkg": v.get("PkgName", ""),
+                        "installed": v.get("InstalledVersion", ""),
+                        "fixed": v.get("FixedVersion", ""),
+                    })
+        elif scanner == "grype":
+            for match in data.get("matches", []):
+                vuln = match.get("vulnerability", {})
+                vulns.append({
+                    "id": vuln.get("id", ""),
+                    "severity": vuln.get("severity", "UNKNOWN").upper(),
+                    "pkg": match.get("artifact", {}).get("name", ""),
+                    "installed": match.get("artifact", {}).get("version", ""),
+                    "fixed": vuln.get("fix", {}).get("versions", [""])[0]
+                        if vuln.get("fix", {}).get("versions") else "",
+                })
+        return vulns
+
+    # ===================================================================
     # Reporting
     # ===================================================================
     def summary(self) -> dict:
@@ -3667,6 +4079,10 @@ def main():
                         help="Save current RBAC state as baseline for drift detection")
     parser.add_argument("--baseline-compare", metavar="FILE",
                         help="Compare current RBAC against a saved baseline")
+    parser.add_argument("--trusted-registries", metavar="LIST",
+                        help="Comma-separated list of additional trusted image registries")
+    parser.add_argument("--trivy-path", metavar="PATH",
+                        help="Path to trivy binary (auto-detected if not set)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Verbose output")
     parser.add_argument("--version", action="version",
@@ -3684,12 +4100,18 @@ def main():
     if args.namespace:
         namespaces = [ns.strip() for ns in args.namespace.split(",") if ns.strip()]
 
+    trusted_regs = set()
+    if args.trusted_registries:
+        trusted_regs = {r.strip() for r in args.trusted_registries.split(",") if r.strip()}
+
     scanner = KSPMScanner(
         kubeconfig=args.kubeconfig or None,
         context=args.context or None,
         namespaces=namespaces,
         all_namespaces=args.all_namespaces,
         verbose=args.verbose,
+        trusted_registries=trusted_regs,
+        trivy_path=args.trivy_path or None,
     )
 
     scanner.scan()
