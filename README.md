@@ -12,8 +12,8 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ## Features
 
-- **~98 security checks** across 10 check groups
-- **CIS Kubernetes Benchmark** mapping for 20+ rules
+- **~120+ security checks** across 16 check groups
+- **CIS Kubernetes Benchmark** mapping for 25+ rules
 - **Agentless** — connects via kubeconfig or in-cluster config
 - **All workload types** — Deployments, StatefulSets, DaemonSets, Jobs, CronJobs
 - **Managed cluster support** — graceful handling for EKS, GKE, AKS where API server pods aren't visible
@@ -22,7 +22,7 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ---
 
-## Check Groups (~98 Rules)
+## Check Groups (~120+ Rules)
 
 | # | Category | Rule IDs | Key Checks |
 |---|----------|----------|------------|
@@ -36,6 +36,12 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 | 8 | **Cluster Configuration** | K8S-CLUSTER-001 to 010 | API server (anonymous auth, insecure port, audit logging, admission controllers, encryption at rest, profiling), Kubernetes Dashboard exposure, Tiller (Helm v2) detection, non-system hostNetwork pods |
 | 9 | **Storage Security** | K8S-PV-001 to 004 | hostPath PersistentVolumes, deprecated Recycle policy, ReadWriteMany PVCs, emptyDir without sizeLimit |
 | 10 | **Admission Control** | K8S-ADM-001 to 005 | Webhook failurePolicy Ignore, missing namespace selector, overly broad scope, high timeout, no validating webhooks |
+| 11 | **Node Security** | K8S-NODE-001 to 006 | Outdated kubelet/K8s version, outdated container runtime, node health (NotReady, pressure), missing topology labels, control plane without NoSchedule taint, old kernel version |
+| 12 | **Availability (PDB)** | K8S-PDB-001 to 003 | Deployments/StatefulSets without PDB, PDB maxUnavailable=0, PDB minAvailable=100% |
+| 13 | **Availability (HPA)** | K8S-HPA-001 to 004 | minReplicas=1, min equals max, target without resource requests, no scale-down stabilization |
+| 14 | **Service Mesh** | K8S-MESH-001 to 004 | Missing sidecar injection (Istio/Linkerd), permissive/disabled mTLS, missing AuthorizationPolicy, exposed mesh gateways |
+| 15 | **Deprecated APIs** | K8S-API-001 to 003 | Deprecated API versions in use, removed APIs still present, PodSecurityPolicy remnants |
+| 16 | **Runtime Security** | K8S-RC-001, K8S-EPH-001/002 | Non-existent RuntimeClass references, active ephemeral debug containers, privileged ephemeral containers |
 
 ---
 
@@ -53,7 +59,10 @@ Rules are mapped to CIS Kubernetes Benchmark sections where applicable:
 | K8S-CLUSTER-001 | CIS 1.2.1 | API server anonymous auth |
 | K8S-CLUSTER-003 | CIS 1.2.22 | Audit logging |
 | K8S-CLUSTER-005 | CIS 1.2.29 | Encryption at rest |
-| ... | ... | 20+ mappings total |
+| K8S-NODE-001 | CIS 4.1.1 | Kubelet version |
+| K8S-NODE-002 | CIS 4.2.6 | Container runtime version |
+| K8S-NODE-005 | CIS 4.2.12 | Control plane taints |
+| ... | ... | 25+ mappings total |
 
 ---
 

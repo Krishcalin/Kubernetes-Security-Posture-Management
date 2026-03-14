@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Kubernetes Security Posture Management (KSPM) Scanner  v1.0.0
+Kubernetes Security Posture Management (KSPM) Scanner  v1.1.0
 
 Agentless scanner that connects to a live Kubernetes cluster via the
 Kubernetes API and performs comprehensive security posture checks covering
 RBAC, workload hardening, network security, namespace isolation, secrets
 management, image security, service accounts, cluster configuration,
-persistent volumes, admission control, and CIS Benchmark alignment.
+persistent volumes, admission control, node security, pod disruption
+budgets, HPA, service mesh, deprecated APIs, runtime classes, and
+CIS Benchmark alignment.
 
 Requirements:
     pip install kubernetes
@@ -18,7 +20,7 @@ Usage:
                            [--verbose] [--version]
 """
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 import os, sys, json, re, argparse, html as html_mod
 from datetime import datetime, timezone
@@ -53,6 +55,77 @@ DANGEROUS_VERBS = {"create", "update", "patch", "delete", "deletecollection", "e
 SENSITIVE_RESOURCES = {"secrets", "pods/exec", "pods/attach", "serviceaccounts/token",
                        "certificatesigningrequests/approval", "tokenreviews",
                        "nodes/proxy", "pods/portforward"}
+
+# Deprecated / removed API versions (K8s 1.26+)
+DEPRECATED_API_VERSIONS = {
+    "extensions/v1beta1": {
+        "removed_in": "1.22",
+        "resources": {"Deployment", "DaemonSet", "ReplicaSet", "Ingress", "NetworkPolicy"},
+        "replacement": "apps/v1 or networking.k8s.io/v1",
+    },
+    "apps/v1beta1": {
+        "removed_in": "1.16",
+        "resources": {"Deployment", "StatefulSet"},
+        "replacement": "apps/v1",
+    },
+    "apps/v1beta2": {
+        "removed_in": "1.16",
+        "resources": {"Deployment", "DaemonSet", "ReplicaSet", "StatefulSet"},
+        "replacement": "apps/v1",
+    },
+    "networking.k8s.io/v1beta1": {
+        "removed_in": "1.22",
+        "resources": {"Ingress", "IngressClass"},
+        "replacement": "networking.k8s.io/v1",
+    },
+    "rbac.authorization.k8s.io/v1beta1": {
+        "removed_in": "1.22",
+        "resources": {"ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding"},
+        "replacement": "rbac.authorization.k8s.io/v1",
+    },
+    "admissionregistration.k8s.io/v1beta1": {
+        "removed_in": "1.22",
+        "resources": {"MutatingWebhookConfiguration", "ValidatingWebhookConfiguration"},
+        "replacement": "admissionregistration.k8s.io/v1",
+    },
+    "apiextensions.k8s.io/v1beta1": {
+        "removed_in": "1.22",
+        "resources": {"CustomResourceDefinition"},
+        "replacement": "apiextensions.k8s.io/v1",
+    },
+    "policy/v1beta1": {
+        "removed_in": "1.25",
+        "resources": {"PodDisruptionBudget", "PodSecurityPolicy"},
+        "replacement": "policy/v1 (PDB) or Pod Security Admission (PSP)",
+    },
+    "autoscaling/v2beta1": {
+        "removed_in": "1.25",
+        "resources": {"HorizontalPodAutoscaler"},
+        "replacement": "autoscaling/v2",
+    },
+    "autoscaling/v2beta2": {
+        "removed_in": "1.26",
+        "resources": {"HorizontalPodAutoscaler"},
+        "replacement": "autoscaling/v2",
+    },
+    "batch/v1beta1": {
+        "removed_in": "1.25",
+        "resources": {"CronJob"},
+        "replacement": "batch/v1",
+    },
+    "flowcontrol.apiserver.k8s.io/v1beta1": {
+        "removed_in": "1.26",
+        "resources": {"FlowSchema", "PriorityLevelConfiguration"},
+        "replacement": "flowcontrol.apiserver.k8s.io/v1beta3 or v1",
+    },
+}
+
+# Known container runtime versions with security issues
+OUTDATED_RUNTIMES = {
+    "containerd": "1.6.0",   # minimum safe version
+    "docker": "20.10.0",
+    "cri-o": "1.24.0",
+}
 
 # ---------------------------------------------------------------------------
 # Finding data class
@@ -124,6 +197,10 @@ class KSPMScanner:
         "K8S-IMG-001": "CIS 5.5.1",   "K8S-CLUSTER-001": "CIS 1.2.1",
         "K8S-CLUSTER-002": "CIS 1.2.19", "K8S-CLUSTER-003": "CIS 1.2.22",
         "K8S-CLUSTER-005": "CIS 1.2.29", "K8S-CLUSTER-006": "CIS 4.2.1",
+        # v1.1.0 additions
+        "K8S-NODE-001": "CIS 4.1.1",  "K8S-NODE-002": "CIS 4.2.6",
+        "K8S-NODE-004": "CIS 4.2.4",  "K8S-NODE-005": "CIS 4.2.12",
+        "K8S-PDB-001": "CIS 5.7.4",
     }
 
     def __init__(self, kubeconfig=None, context=None, namespaces=None,
@@ -162,6 +239,13 @@ class KSPMScanner:
             self.policy_v1 = client.PolicyV1Api()
         except Exception:
             pass
+        self.autoscaling_v2 = None
+        try:
+            self.autoscaling_v2 = client.AutoscalingV2Api()
+        except Exception:
+            pass
+        self.custom_api = client.CustomObjectsApi()
+        self.version_api = client.VersionApi()
 
     # -----------------------------------------------------------------------
     # Helpers
@@ -220,6 +304,13 @@ class KSPMScanner:
         self._check_persistent_volumes()
         self._check_jobs()
         self._check_admission_control()
+        # v1.1.0 check groups
+        self._check_node_security()
+        self._check_pod_disruption_budgets()
+        self._check_hpa_security()
+        self._check_service_mesh()
+        self._check_deprecated_apis()
+        self._check_runtime_security()
 
         print(f"[*] Scan complete. {len(self.findings)} findings identified.")
 
@@ -1721,6 +1812,696 @@ class KSPMScanner:
                 "Deploy a policy engine or configure Pod Security Admission for workload validation.",
                 "CWE-284",
             ))
+
+    # ===================================================================
+    # CHECK GROUP 11: Node Security  (K8S-NODE-001 to 006)  [v1.1.0]
+    # ===================================================================
+    def _check_node_security(self):
+        self._vprint("  [*] Checking node security ...")
+
+        try:
+            nodes = self.core_v1.list_node().items
+        except ApiException:
+            self._warn("Cannot list nodes")
+            return
+
+        for node in nodes:
+            name = node.metadata.name
+            res = self._res_path(None, "Node", name)
+            labels = node.metadata.labels or {}
+            info = node.status.node_info if node.status else None
+
+            # --- K8S-NODE-001: Kubelet version / outdated K8s ---
+            if info:
+                kv = info.kubelet_version or ""
+                # Check for very old K8s versions (< 1.27 is EOL as of 2024)
+                ver_match = re.match(r'v?(\d+)\.(\d+)', kv)
+                if ver_match:
+                    major, minor = int(ver_match.group(1)), int(ver_match.group(2))
+                    if major == 1 and minor < 28:
+                        self._add(Finding(
+                            "K8S-NODE-001", "Node running outdated Kubernetes version",
+                            "Node Security", "HIGH", res, None,
+                            f"kubeletVersion: {kv}",
+                            f"Kubelet version {kv} may be end-of-life and missing security patches.",
+                            "Upgrade nodes to a supported Kubernetes version (1.28+).",
+                            "CWE-1104",
+                        ))
+
+            # --- K8S-NODE-002: Container runtime version ---
+            if info:
+                runtime_str = info.container_runtime_version or ""
+                # Format: "containerd://1.6.20" or "docker://20.10.21"
+                rt_match = re.match(r'(\w+)://(\d+\.\d+\.\d+)', runtime_str)
+                if rt_match:
+                    rt_name = rt_match.group(1).lower()
+                    rt_ver = rt_match.group(2)
+                    min_ver = OUTDATED_RUNTIMES.get(rt_name)
+                    if min_ver and self._ver_lt(rt_ver, min_ver):
+                        self._add(Finding(
+                            "K8S-NODE-002", "Outdated container runtime",
+                            "Node Security", "HIGH", res, None,
+                            f"runtime: {runtime_str}",
+                            f"Container runtime {rt_name} {rt_ver} is below minimum safe version {min_ver}.",
+                            f"Upgrade {rt_name} to {min_ver} or later.",
+                            "CWE-1104",
+                        ))
+
+            # --- K8S-NODE-003: Node in NotReady condition ---
+            if node.status and node.status.conditions:
+                for cond in node.status.conditions:
+                    if cond.type == "Ready" and cond.status != "True":
+                        self._add(Finding(
+                            "K8S-NODE-003", "Node not in Ready state",
+                            "Node Security", "MEDIUM", res, None,
+                            f"Ready: {cond.status}, reason: {cond.reason or 'unknown'}",
+                            "NotReady nodes may not enforce security policies or may have underlying issues.",
+                            "Investigate node health. Check kubelet logs and system resources.",
+                        ))
+                    # Disk/Memory/PID pressure
+                    if cond.type in ("DiskPressure", "MemoryPressure", "PIDPressure") and cond.status == "True":
+                        self._add(Finding(
+                            "K8S-NODE-003", f"Node under {cond.type}",
+                            "Node Security", "MEDIUM", res, None,
+                            f"{cond.type}: True",
+                            f"Node is under {cond.type}, which may cause pod evictions and instability.",
+                            "Investigate resource usage. Scale up or drain workloads.",
+                        ))
+
+            # --- K8S-NODE-004: Missing critical node labels ---
+            if "topology.kubernetes.io/zone" not in labels and "failure-domain.beta.kubernetes.io/zone" not in labels:
+                self._add(Finding(
+                    "K8S-NODE-004", "Node missing topology zone label",
+                    "Node Security", "LOW", res, None,
+                    "topology.kubernetes.io/zone: not set",
+                    "Without zone labels, pod topology spread constraints cannot ensure HA.",
+                    "Ensure nodes have topology.kubernetes.io/zone labels for proper scheduling.",
+                ))
+
+            # --- K8S-NODE-005: Node has no taints (worker node) ---
+            taints = node.spec.taints or []
+            is_control_plane = any(
+                l in labels for l in ("node-role.kubernetes.io/control-plane",
+                                      "node-role.kubernetes.io/master"))
+            if not is_control_plane and not taints:
+                # Workers without taints accept all pods — not inherently bad,
+                # but control-plane nodes without taints are concerning
+                pass  # normal for workers
+            if is_control_plane:
+                has_cp_taint = any(
+                    t.key in ("node-role.kubernetes.io/control-plane",
+                              "node-role.kubernetes.io/master")
+                    for t in taints)
+                if not has_cp_taint:
+                    self._add(Finding(
+                        "K8S-NODE-005", "Control plane node without NoSchedule taint",
+                        "Node Security", "HIGH", res, None,
+                        "control-plane taint: not set",
+                        "Control plane node accepts regular workload pods, increasing attack surface.",
+                        "Add taint node-role.kubernetes.io/control-plane:NoSchedule to control plane nodes.",
+                        "CWE-250",
+                    ))
+
+            # --- K8S-NODE-006: Kernel version check ---
+            if info and info.kernel_version:
+                kv_match = re.match(r'(\d+)\.(\d+)', info.kernel_version)
+                if kv_match:
+                    k_major, k_minor = int(kv_match.group(1)), int(kv_match.group(2))
+                    if k_major < 5 or (k_major == 5 and k_minor < 4):
+                        self._add(Finding(
+                            "K8S-NODE-006", "Node running old kernel version",
+                            "Node Security", "MEDIUM", res, None,
+                            f"kernelVersion: {info.kernel_version}",
+                            "Kernel versions below 5.4 lack important security features (eBPF, cgroup v2, seccomp improvements).",
+                            "Upgrade node OS to a distribution with kernel 5.4+.",
+                            "CWE-1104",
+                        ))
+
+    @staticmethod
+    def _ver_lt(v1: str, v2: str) -> bool:
+        """Return True if version v1 < v2 (simple dotted comparison)."""
+        def parts(v):
+            return [int(x) for x in re.findall(r'\d+', v)]
+        return parts(v1) < parts(v2)
+
+    # ===================================================================
+    # CHECK GROUP 12: Pod Disruption Budgets  (K8S-PDB-001 to 003) [v1.1.0]
+    # ===================================================================
+    def _check_pod_disruption_budgets(self):
+        self._vprint("  [*] Checking Pod Disruption Budgets ...")
+
+        if not self.policy_v1:
+            self._vprint("    [*] PolicyV1 API not available, skipping PDB checks")
+            return
+
+        namespaces = self._get_namespaces()
+
+        for ns in namespaces:
+            if ns in SYSTEM_NAMESPACES:
+                continue
+
+            # Get PDBs in this namespace
+            try:
+                pdbs = self.policy_v1.list_namespaced_pod_disruption_budget(ns).items
+            except ApiException:
+                continue
+
+            # Get Deployments and StatefulSets (workloads that should have PDBs)
+            deployments = []
+            statefulsets = []
+            try:
+                deployments = self.apps_v1.list_namespaced_deployment(ns).items
+            except ApiException:
+                pass
+            try:
+                statefulsets = self.apps_v1.list_namespaced_stateful_set(ns).items
+            except ApiException:
+                pass
+
+            # Build a set of label selectors covered by PDBs
+            pdb_selectors = []
+            for pdb in pdbs:
+                if pdb.spec and pdb.spec.selector:
+                    match_labels = pdb.spec.selector.match_labels or {}
+                    pdb_selectors.append(match_labels)
+
+                    res = self._res_path(ns, "PodDisruptionBudget", pdb.metadata.name)
+
+                    # --- K8S-PDB-002: PDB with maxUnavailable=0 ---
+                    max_unavail = pdb.spec.max_unavailable
+                    if max_unavail is not None and str(max_unavail) == "0":
+                        self._add(Finding(
+                            "K8S-PDB-002", "PDB blocks all voluntary disruptions",
+                            "Availability", "HIGH", res, None,
+                            "maxUnavailable: 0",
+                            "PDB with maxUnavailable=0 blocks all voluntary disruptions including node drains and upgrades.",
+                            "Set maxUnavailable to at least 1 or use a percentage.",
+                        ))
+
+                    # --- K8S-PDB-003: PDB with minAvailable equal to replicas ---
+                    min_avail = pdb.spec.min_available
+                    if min_avail is not None and str(min_avail) == "100%":
+                        self._add(Finding(
+                            "K8S-PDB-003", "PDB requires 100% availability",
+                            "Availability", "HIGH", res, None,
+                            "minAvailable: 100%",
+                            "PDB requires all pods to be available, blocking voluntary disruptions.",
+                            "Reduce minAvailable to allow at least 1 pod to be disrupted.",
+                        ))
+
+            # --- K8S-PDB-001: Deployment/StatefulSet without PDB ---
+            for dep in deployments:
+                replicas = dep.spec.replicas or 1
+                if replicas < 2:
+                    continue  # single-replica doesn't benefit from PDB
+
+                dep_labels = dep.spec.selector.match_labels or {} if dep.spec.selector else {}
+                covered = any(
+                    all(dep_labels.get(k) == v for k, v in sel.items())
+                    for sel in pdb_selectors if sel
+                )
+                if not covered:
+                    self._add(Finding(
+                        "K8S-PDB-001", "Deployment without PodDisruptionBudget",
+                        "Availability", "MEDIUM",
+                        self._res_path(ns, "Deployment", dep.metadata.name),
+                        None, f"replicas: {replicas}, pdb: none",
+                        "Multi-replica Deployment has no PDB. Node drains may disrupt all replicas simultaneously.",
+                        "Create a PodDisruptionBudget matching this Deployment's labels.",
+                    ))
+
+            for sts in statefulsets:
+                replicas = sts.spec.replicas or 1
+                if replicas < 2:
+                    continue
+                sts_labels = sts.spec.selector.match_labels or {} if sts.spec.selector else {}
+                covered = any(
+                    all(sts_labels.get(k) == v for k, v in sel.items())
+                    for sel in pdb_selectors if sel
+                )
+                if not covered:
+                    self._add(Finding(
+                        "K8S-PDB-001", "StatefulSet without PodDisruptionBudget",
+                        "Availability", "MEDIUM",
+                        self._res_path(ns, "StatefulSet", sts.metadata.name),
+                        None, f"replicas: {replicas}, pdb: none",
+                        "Multi-replica StatefulSet has no PDB. Voluntary disruptions may cause data unavailability.",
+                        "Create a PodDisruptionBudget matching this StatefulSet's labels.",
+                    ))
+
+    # ===================================================================
+    # CHECK GROUP 13: HPA Security  (K8S-HPA-001 to 004)  [v1.1.0]
+    # ===================================================================
+    def _check_hpa_security(self):
+        self._vprint("  [*] Checking HPA security ...")
+
+        if not self.autoscaling_v2:
+            self._vprint("    [*] AutoscalingV2 API not available, skipping HPA checks")
+            return
+
+        namespaces = self._get_namespaces()
+
+        for ns in namespaces:
+            if ns in SYSTEM_NAMESPACES:
+                continue
+
+            try:
+                hpas = self.autoscaling_v2.list_namespaced_horizontal_pod_autoscaler(ns).items
+            except ApiException:
+                continue
+
+            for hpa in hpas:
+                res = self._res_path(ns, "HorizontalPodAutoscaler", hpa.metadata.name)
+                spec = hpa.spec
+                if not spec:
+                    continue
+
+                min_r = spec.min_replicas or 1
+                max_r = spec.max_replicas
+
+                # --- K8S-HPA-001: HPA with minReplicas=1 ---
+                if min_r == 1:
+                    self._add(Finding(
+                        "K8S-HPA-001", "HPA minReplicas is 1",
+                        "Availability", "MEDIUM", res, None,
+                        f"minReplicas: {min_r}, maxReplicas: {max_r}",
+                        "HPA can scale down to a single replica, eliminating redundancy.",
+                        "Set minReplicas to at least 2 for production workloads.",
+                    ))
+
+                # --- K8S-HPA-002: HPA minReplicas equals maxReplicas ---
+                if min_r == max_r:
+                    self._add(Finding(
+                        "K8S-HPA-002", "HPA min equals max replicas",
+                        "Availability", "LOW", res, None,
+                        f"minReplicas: {min_r}, maxReplicas: {max_r}",
+                        "HPA cannot scale — min and max replicas are identical. Autoscaler is effectively disabled.",
+                        "Increase maxReplicas above minReplicas, or remove the HPA if scaling is not needed.",
+                    ))
+
+                # --- K8S-HPA-003: HPA targets workload without resource requests ---
+                target_ref = spec.scale_target_ref
+                if target_ref and target_ref.kind in ("Deployment", "StatefulSet"):
+                    try:
+                        if target_ref.kind == "Deployment":
+                            wl = self.apps_v1.read_namespaced_deployment(target_ref.name, ns)
+                        else:
+                            wl = self.apps_v1.read_namespaced_stateful_set(target_ref.name, ns)
+                        containers = wl.spec.template.spec.containers or []
+                        for ctr in containers:
+                            req = ctr.resources.requests if ctr.resources else None
+                            if not req or ("cpu" not in req and "memory" not in req):
+                                self._add(Finding(
+                                    "K8S-HPA-003",
+                                    "HPA target has no resource requests",
+                                    "Availability", "HIGH", res, None,
+                                    f"target: {target_ref.kind}/{target_ref.name}, "
+                                    f"container: {ctr.name}",
+                                    "HPA cannot calculate utilization without resource requests. "
+                                    "Scaling decisions will be unreliable.",
+                                    "Set resources.requests.cpu and/or memory on all containers "
+                                    "targeted by the HPA.",
+                                ))
+                                break  # one finding per HPA is enough
+                    except ApiException:
+                        pass
+
+                # --- K8S-HPA-004: No scale-down stabilization ---
+                behavior = spec.behavior
+                has_scaledown_policy = False
+                if behavior and behavior.scale_down:
+                    if behavior.scale_down.stabilization_window_seconds:
+                        has_scaledown_policy = True
+                    if behavior.scale_down.policies:
+                        has_scaledown_policy = True
+                if not has_scaledown_policy:
+                    self._add(Finding(
+                        "K8S-HPA-004", "HPA without scale-down stabilization",
+                        "Availability", "LOW", res, None,
+                        "behavior.scaleDown: not configured",
+                        "Without scale-down stabilization, HPA may rapidly remove replicas causing brief outages.",
+                        "Configure behavior.scaleDown.stabilizationWindowSeconds (e.g., 300).",
+                    ))
+
+    # ===================================================================
+    # CHECK GROUP 14: Service Mesh  (K8S-MESH-001 to 004)  [v1.1.0]
+    # ===================================================================
+    def _check_service_mesh(self):
+        self._vprint("  [*] Checking service mesh security ...")
+
+        namespaces = self._get_namespaces()
+        mesh_detected = {"istio": False, "linkerd": False}
+
+        # Detect Istio
+        try:
+            ns_list = self.core_v1.list_namespace().items
+            ns_names = {ns.metadata.name for ns in ns_list}
+            ns_labels_map = {ns.metadata.name: (ns.metadata.labels or {}) for ns in ns_list}
+            if "istio-system" in ns_names:
+                mesh_detected["istio"] = True
+            if any("linkerd" in n for n in ns_names):
+                mesh_detected["linkerd"] = True
+        except ApiException:
+            pass
+
+        if not any(mesh_detected.values()):
+            self._vprint("    [*] No service mesh detected, skipping mesh checks")
+            return
+
+        # --- Istio-specific checks ---
+        if mesh_detected["istio"]:
+            # K8S-MESH-001: Namespace without sidecar injection
+            for ns in namespaces:
+                if ns in SYSTEM_NAMESPACES or ns == "istio-system":
+                    continue
+                labels = ns_labels_map.get(ns, {})
+                injection = labels.get("istio-injection", "")
+                rev_label = labels.get("istio.io/rev", "")
+                if injection != "enabled" and not rev_label:
+                    self._add(Finding(
+                        "K8S-MESH-001", "Namespace without Istio sidecar injection",
+                        "Service Mesh", "MEDIUM",
+                        self._res_path(None, "Namespace", ns), None,
+                        f"istio-injection: {injection or 'not set'}",
+                        "Namespace is not configured for automatic Istio sidecar injection. "
+                        "Pods will not get mTLS or traffic management.",
+                        "Add label istio-injection=enabled or istio.io/rev=<tag> to the namespace.",
+                    ))
+
+            # K8S-MESH-002: Check for permissive mTLS (PeerAuthentication)
+            try:
+                pas = self.custom_api.list_cluster_custom_object(
+                    "security.istio.io", "v1beta1", "peerauthentications")
+                for pa in pas.get("items", []):
+                    mtls_mode = (pa.get("spec", {}).get("mtls", {}).get("mode", "")).upper()
+                    pa_ns = pa.get("metadata", {}).get("namespace", "istio-system")
+                    pa_name = pa.get("metadata", {}).get("name", "unknown")
+                    if mtls_mode == "PERMISSIVE":
+                        self._add(Finding(
+                            "K8S-MESH-002", "Istio mTLS set to PERMISSIVE",
+                            "Service Mesh", "HIGH",
+                            self._res_path(pa_ns, "PeerAuthentication", pa_name),
+                            None, f"mtls.mode: PERMISSIVE",
+                            "PERMISSIVE mode accepts both plaintext and mTLS traffic. "
+                            "Attackers can bypass encryption by sending unencrypted requests.",
+                            "Set mTLS mode to STRICT to enforce mutual TLS for all traffic.",
+                            "CWE-319",
+                        ))
+                    if mtls_mode == "DISABLE":
+                        self._add(Finding(
+                            "K8S-MESH-002", "Istio mTLS disabled",
+                            "Service Mesh", "CRITICAL",
+                            self._res_path(pa_ns, "PeerAuthentication", pa_name),
+                            None, f"mtls.mode: DISABLE",
+                            "mTLS is disabled. All service-to-service traffic is unencrypted.",
+                            "Set mTLS mode to STRICT.",
+                            "CWE-319",
+                        ))
+            except ApiException:
+                self._vprint("    [*] Cannot query PeerAuthentication resources")
+
+            # K8S-MESH-003: Check for missing AuthorizationPolicy
+            try:
+                authz = self.custom_api.list_cluster_custom_object(
+                    "security.istio.io", "v1beta1", "authorizationpolicies")
+                authz_namespaces = {
+                    item.get("metadata", {}).get("namespace", "")
+                    for item in authz.get("items", [])
+                }
+                for ns in namespaces:
+                    if ns in SYSTEM_NAMESPACES or ns == "istio-system":
+                        continue
+                    labels = ns_labels_map.get(ns, {})
+                    if labels.get("istio-injection") == "enabled" or labels.get("istio.io/rev"):
+                        if ns not in authz_namespaces:
+                            self._add(Finding(
+                                "K8S-MESH-003", "Istio namespace without AuthorizationPolicy",
+                                "Service Mesh", "MEDIUM",
+                                self._res_path(None, "Namespace", ns), None,
+                                "authorizationPolicies: 0",
+                                "Mesh-enabled namespace has no AuthorizationPolicy. "
+                                "All traffic between services is allowed.",
+                                "Create AuthorizationPolicies to enforce least-privilege service access.",
+                                "CWE-284",
+                            ))
+            except ApiException:
+                pass
+
+        # --- Linkerd-specific checks ---
+        if mesh_detected["linkerd"]:
+            for ns in namespaces:
+                if ns in SYSTEM_NAMESPACES:
+                    continue
+                labels = ns_labels_map.get(ns, {})
+                annotations = {}
+                try:
+                    ns_obj = self.core_v1.read_namespace(ns)
+                    annotations = ns_obj.metadata.annotations or {}
+                except ApiException:
+                    pass
+                if labels.get("linkerd.io/inject") != "enabled":
+                    self._add(Finding(
+                        "K8S-MESH-001", "Namespace without Linkerd injection",
+                        "Service Mesh", "MEDIUM",
+                        self._res_path(None, "Namespace", ns), None,
+                        f"linkerd.io/inject: {labels.get('linkerd.io/inject', 'not set')}",
+                        "Namespace is not configured for Linkerd proxy injection.",
+                        "Add annotation linkerd.io/inject=enabled to the namespace.",
+                    ))
+
+        # K8S-MESH-004: Service mesh gateway exposed without auth
+        for ns in namespaces:
+            try:
+                svcs = self.core_v1.list_namespaced_service(ns).items
+                for svc in svcs:
+                    svc_name = svc.metadata.name.lower()
+                    labels = svc.metadata.labels or {}
+                    is_gateway = ("gateway" in svc_name or "ingress" in svc_name or
+                                  labels.get("istio") == "ingressgateway" or
+                                  labels.get("app") == "istio-ingressgateway")
+                    if is_gateway and svc.spec.type in ("LoadBalancer", "NodePort"):
+                        self._add(Finding(
+                            "K8S-MESH-004", "Mesh gateway externally exposed",
+                            "Service Mesh", "MEDIUM",
+                            self._res_path(ns, "Service", svc.metadata.name),
+                            None, f"type: {svc.spec.type}",
+                            "Service mesh gateway is exposed externally. Ensure mTLS and "
+                            "AuthorizationPolicies protect backend services.",
+                            "Verify gateway has proper VirtualService routing and "
+                            "RequestAuthentication configured.",
+                        ))
+            except ApiException:
+                pass
+
+    # ===================================================================
+    # CHECK GROUP 15: Deprecated APIs  (K8S-API-001 to 003)  [v1.1.0]
+    # ===================================================================
+    def _check_deprecated_apis(self):
+        self._vprint("  [*] Checking for deprecated API versions ...")
+
+        # Get cluster version to determine which APIs are actually removed
+        cluster_minor = 0
+        try:
+            ver = self.version_api.get_code()
+            ver_match = re.match(r'(\d+)', ver.minor.rstrip("+"))
+            if ver_match:
+                cluster_minor = int(ver_match.group(1))
+        except Exception:
+            pass
+
+        # Query the API server for resource lists to find deprecated apiVersions
+        api_client = self.core_v1.api_client
+
+        try:
+            # Get all API groups and versions
+            api_groups_resp = api_client.call_api(
+                '/apis', 'GET', response_type='object',
+                _return_http_data_only=True)
+            groups = api_groups_resp.get("groups", []) if isinstance(api_groups_resp, dict) else []
+        except Exception:
+            groups = []
+
+        for api_version, info in DEPRECATED_API_VERSIONS.items():
+            removed_in = info["removed_in"]
+            removed_minor = int(removed_in.split(".")[1]) if "." in removed_in else 0
+            replacement = info["replacement"]
+
+            # Try listing resources using the deprecated API
+            group_version = api_version
+            parts = group_version.split("/")
+            if len(parts) == 2:
+                group, version = parts
+            else:
+                continue
+
+            try:
+                path = f"/apis/{group}/{version}"
+                resp = api_client.call_api(
+                    path, 'GET', response_type='object',
+                    _return_http_data_only=True)
+                resources = resp.get("resources", []) if isinstance(resp, dict) else []
+
+                if resources:
+                    resource_names = [r.get("kind", "") for r in resources if r.get("kind")]
+                    expected = info["resources"]
+                    found_resources = expected & set(resource_names)
+
+                    if found_resources:
+                        # Determine severity based on whether it's just deprecated or removed
+                        if cluster_minor > 0 and cluster_minor >= removed_minor:
+                            severity = "HIGH"
+                            rule_id = "K8S-API-002"
+                            desc = (f"API version {api_version} was removed in Kubernetes {removed_in}. "
+                                    f"Resources using it will fail on cluster upgrade.")
+                        else:
+                            severity = "MEDIUM"
+                            rule_id = "K8S-API-001"
+                            desc = (f"API version {api_version} is deprecated and will be removed in "
+                                    f"Kubernetes {removed_in}.")
+
+                        self._add(Finding(
+                            rule_id,
+                            f"Deprecated API version: {api_version}",
+                            "Deprecated APIs", severity,
+                            self._res_path(None, "APIVersion", api_version),
+                            None,
+                            f"resources: {', '.join(sorted(found_resources))}",
+                            desc,
+                            f"Migrate to {replacement}.",
+                            "CWE-1104",
+                        ))
+            except Exception:
+                pass
+
+        # --- K8S-API-003: PodSecurityPolicy still in use (removed in 1.25) ---
+        try:
+            path = "/apis/policy/v1beta1/podsecuritypolicies"
+            resp = api_client.call_api(
+                path, 'GET', response_type='object',
+                _return_http_data_only=True)
+            items = resp.get("items", []) if isinstance(resp, dict) else []
+            if items:
+                for psp in items:
+                    psp_name = psp.get("metadata", {}).get("name", "unknown")
+                    self._add(Finding(
+                        "K8S-API-003", "PodSecurityPolicy still in use",
+                        "Deprecated APIs", "HIGH",
+                        self._res_path(None, "PodSecurityPolicy", psp_name),
+                        None, f"apiVersion: policy/v1beta1",
+                        "PodSecurityPolicy is removed in Kubernetes 1.25. "
+                        "Existing PSPs have no effect on newer clusters.",
+                        "Migrate to Pod Security Admission (PSA) with namespace labels.",
+                        "CWE-1104",
+                    ))
+        except Exception:
+            pass
+
+    # ===================================================================
+    # CHECK GROUP 16: Runtime & Ephemeral  (K8S-RC/EPH)  [v1.1.0]
+    # ===================================================================
+    def _check_runtime_security(self):
+        self._vprint("  [*] Checking runtime classes and ephemeral containers ...")
+
+        # --- K8S-RC-001/002: RuntimeClass checks ---
+        try:
+            rcs = self.custom_api.list_cluster_custom_object(
+                "node.k8s.io", "v1", "runtimeclasses")
+            rc_names = {
+                item.get("metadata", {}).get("name", "")
+                for item in rcs.get("items", [])
+            }
+            rc_handlers = {
+                item.get("metadata", {}).get("name", ""): item.get("handler", "")
+                for item in rcs.get("items", [])
+            }
+        except Exception:
+            rc_names = set()
+            rc_handlers = {}
+
+        sandboxed_rcs = set()
+        for name, handler in rc_handlers.items():
+            if any(s in handler.lower() for s in ("gvisor", "kata", "runsc", "firecracker")):
+                sandboxed_rcs.add(name)
+
+        # Check workloads for RuntimeClass usage
+        namespaces = self._get_namespaces()
+        for ns in namespaces:
+            if ns in SYSTEM_NAMESPACES:
+                continue
+
+            workloads = []
+            try:
+                for d in self.apps_v1.list_namespaced_deployment(ns).items:
+                    workloads.append(("Deployment", d.metadata.name, d.spec.template.spec))
+            except ApiException:
+                pass
+            try:
+                for s in self.apps_v1.list_namespaced_stateful_set(ns).items:
+                    workloads.append(("StatefulSet", s.metadata.name, s.spec.template.spec))
+            except ApiException:
+                pass
+
+            for kind, name, pod_spec in workloads:
+                if not pod_spec:
+                    continue
+                rc_name = pod_spec.runtime_class_name
+
+                # K8S-RC-001: Workload using non-existent RuntimeClass
+                if rc_name and rc_names and rc_name not in rc_names:
+                    self._add(Finding(
+                        "K8S-RC-001", "Workload references non-existent RuntimeClass",
+                        "Runtime Security", "HIGH",
+                        self._res_path(ns, kind, name), None,
+                        f"runtimeClassName: {rc_name}",
+                        f"RuntimeClass '{rc_name}' does not exist. Pods will fail to schedule.",
+                        "Create the RuntimeClass or update the workload to use an existing one.",
+                    ))
+
+                # K8S-RC-002: Workload not using sandboxed runtime (informational)
+                # Only flag if sandboxed runtimes are available but not used
+                if sandboxed_rcs and not rc_name:
+                    # Check if workload handles untrusted input (heuristic: external-facing)
+                    pass  # Too noisy to flag all workloads; skip unless targeted
+
+        # --- K8S-EPH-001: Active ephemeral containers ---
+        for ns in namespaces:
+            if ns in SYSTEM_NAMESPACES:
+                continue
+            try:
+                pods = self.core_v1.list_namespaced_pod(ns).items
+            except ApiException:
+                continue
+
+            for pod in pods:
+                eph_containers = pod.spec.ephemeral_containers or [] if pod.spec else []
+                if eph_containers:
+                    for ec in eph_containers:
+                        self._add(Finding(
+                            "K8S-EPH-001", "Ephemeral debug container present",
+                            "Runtime Security", "MEDIUM",
+                            self._res_path(ns, "Pod", pod.metadata.name),
+                            None, f"ephemeralContainer: {ec.name}",
+                            "An ephemeral debug container is attached to this pod. "
+                            "Debug containers may have elevated access and should be temporary.",
+                            "Remove ephemeral containers after debugging is complete. "
+                            "Monitor kubectl debug usage via audit logs.",
+                            "CWE-250",
+                        ))
+
+                        # Check if ephemeral container is privileged
+                        ec_sc = ec.security_context
+                        if ec_sc and ec_sc.privileged:
+                            self._add(Finding(
+                                "K8S-EPH-002", "Privileged ephemeral container",
+                                "Runtime Security", "CRITICAL",
+                                self._res_path(ns, "Pod", pod.metadata.name),
+                                None, f"ephemeralContainer: {ec.name}, privileged: true",
+                                "Privileged ephemeral container has full host access. "
+                                "This is a significant security risk even for debugging.",
+                                "Use non-privileged ephemeral containers. "
+                                "Restrict debug container capabilities via admission control.",
+                                "CWE-250",
+                            ))
 
     # ===================================================================
     # Reporting

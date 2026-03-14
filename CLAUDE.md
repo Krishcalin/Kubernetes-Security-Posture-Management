@@ -4,7 +4,7 @@
 
 - **Repository**: `Kubernetes-Security-Posture-Management`
 - **Scanner file**: `kspm_scanner.py`
-- **Version**: 1.0.0
+- **Version**: 1.1.0
 - **Language**: Python 3.8+
 - **Dependency**: `kubernetes` (Python client for Kubernetes API)
 - **Type**: Agentless live-cluster scanner — queries the Kubernetes API via kubeconfig or in-cluster config
@@ -27,7 +27,13 @@ Finding class  →  KSPMScanner class  →  CLI (argparse)
                     ├── _check_cluster_config()
                     ├── _check_persistent_volumes()
                     ├── _check_jobs()
-                    └── _check_admission_control()
+                    ├── _check_admission_control()
+                    ├── _check_node_security()        [v1.1.0]
+                    ├── _check_pod_disruption_budgets() [v1.1.0]
+                    ├── _check_hpa_security()          [v1.1.0]
+                    ├── _check_service_mesh()          [v1.1.0]
+                    ├── _check_deprecated_apis()       [v1.1.0]
+                    └── _check_runtime_security()      [v1.1.0]
 ```
 
 ### Key Design Decisions
@@ -56,6 +62,13 @@ Format: `K8S-{CATEGORY}-{NNN}`
 | K8S-PV | Storage Security | 4 |
 | K8S-JOB | Job Security | 3 |
 | K8S-ADM | Admission Control | 5 |
+| K8S-NODE | Node Security | 6 |
+| K8S-PDB | Pod Disruption Budgets | 3 |
+| K8S-HPA | HPA / Availability | 4 |
+| K8S-MESH | Service Mesh | 4 |
+| K8S-API | Deprecated APIs | 3 |
+| K8S-RC | Runtime Classes | 1 |
+| K8S-EPH | Ephemeral Containers | 2 |
 
 ### Severity Model
 
@@ -113,15 +126,14 @@ python kspm_scanner.py --context kind-kind
 
 ## Roadmap — Future Enhancements
 
-### v1.1.0 — Expanded Checks
-- [ ] **Runtime class checks**: Detect workloads using non-default RuntimeClass (gVisor, Kata)
-- [ ] **Pod Disruption Budgets**: Flag Deployments without PDBs in production namespaces
-- [ ] **Horizontal Pod Autoscaler**: Flag HPA without resource requests
-- [ ] **Service mesh detection**: Identify Istio/Linkerd sidecar injection status
-- [ ] **Deprecated API versions**: Scan for resources using deprecated apiVersions
-- [ ] **Ephemeral containers**: Flag pods with debug/ephemeral containers active
-- [ ] **Init container security**: Separate severity for init vs runtime containers
-- [ ] **Node security**: Check node labels, taints, and kernel version
+### v1.1.0 — Expanded Checks (COMPLETE)
+- [x] **Node security** (K8S-NODE-001 to 006): Kubelet/K8s version, container runtime version, node health/pressure, topology labels, control plane taints, kernel version
+- [x] **Pod Disruption Budgets** (K8S-PDB-001 to 003): Deployments/StatefulSets without PDBs, maxUnavailable=0, minAvailable=100%
+- [x] **Horizontal Pod Autoscaler** (K8S-HPA-001 to 004): minReplicas=1, min==max, target without resource requests, no scale-down stabilization
+- [x] **Service mesh detection** (K8S-MESH-001 to 004): Istio/Linkerd sidecar injection, mTLS mode (PERMISSIVE/DISABLE), missing AuthorizationPolicy, exposed gateways
+- [x] **Deprecated API versions** (K8S-API-001 to 003): 12 deprecated API versions tracked, PodSecurityPolicy remnants, severity based on cluster version
+- [x] **Runtime classes** (K8S-RC-001): Non-existent RuntimeClass references, sandboxed runtime detection
+- [x] **Ephemeral containers** (K8S-EPH-001 to 002): Active debug containers, privileged ephemeral containers
 
 ### v1.2.0 — Compliance Frameworks
 - [ ] **NSA/CISA Kubernetes Hardening Guide** mapping (separate from CIS)

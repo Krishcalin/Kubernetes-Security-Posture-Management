@@ -189,12 +189,12 @@
   <!-- Pill 1: Rules -->
   <g transform="translate(310, 265)">
     <rect x="0" y="0" width="100" height="30" rx="15" fill="#326ce5" opacity="0.2" stroke="#326ce5" stroke-width="0.8"/>
-    <text x="50" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">~98 Rules</text>
+    <text x="50" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">120+ Rules</text>
   </g>
   <!-- Pill 2: Checks -->
   <g transform="translate(422, 265)">
     <rect x="0" y="0" width="120" height="30" rx="15" fill="#326ce5" opacity="0.2" stroke="#326ce5" stroke-width="0.8"/>
-    <text x="60" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">10 Check Groups</text>
+    <text x="60" y="20" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="#89b4fa" text-anchor="middle">16 Check Groups</text>
   </g>
   <!-- Pill 3: CIS -->
   <g transform="translate(554, 265)">
@@ -219,11 +219,15 @@
     <text x="204" y="0" fill="#3a5070"> | </text>
     <text x="260" y="0">Secrets</text>
     <text x="264" y="0" fill="#3a5070"> | </text>
-    <text x="325" y="0">Namespaces</text>
+    <text x="325" y="0">Nodes</text>
     <text x="329" y="0" fill="#3a5070"> | </text>
-    <text x="415" y="0">Admission</text>
-    <text x="419" y="0" fill="#3a5070"> | </text>
-    <text x="495" y="0">Storage</text>
+    <text x="375" y="0">Mesh</text>
+    <text x="379" y="0" fill="#3a5070"> | </text>
+    <text x="420" y="0">PDBs</text>
+    <text x="424" y="0" fill="#3a5070"> | </text>
+    <text x="465" y="0">APIs</text>
+    <text x="469" y="0" fill="#3a5070"> | </text>
+    <text x="505" y="0">Runtime</text>
   </g>
 
   <!-- Severity indicator dots (bottom right area) -->
@@ -252,7 +256,7 @@
   <!-- Version badge (bottom right) -->
   <g transform="translate(1020, 280)">
     <rect x="0" y="0" width="70" height="26" rx="6" fill="#326ce5" opacity="0.2" stroke="#326ce5" stroke-width="0.8"/>
-    <text x="35" y="17" font-family="'Segoe UI',Arial,sans-serif" font-size="11" font-weight="600" fill="#89b4fa" text-anchor="middle">v1.0.0</text>
+    <text x="35" y="17" font-family="'Segoe UI',Arial,sans-serif" font-size="11" font-weight="600" fill="#89b4fa" text-anchor="middle">v1.1.0</text>
   </g>
 
   <!-- Top-right corner accent -->
