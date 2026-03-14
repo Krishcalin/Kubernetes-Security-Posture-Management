@@ -4,7 +4,7 @@
 
 - **Repository**: `Kubernetes-Security-Posture-Management`
 - **Scanner file**: `kspm_scanner.py`
-- **Version**: 1.2.0
+- **Version**: 1.3.0
 - **Language**: Python 3.8+
 - **Dependency**: `kubernetes` (Python client for Kubernetes API)
 - **Type**: Agentless live-cluster scanner — queries the Kubernetes API via kubeconfig or in-cluster config
@@ -33,7 +33,8 @@ Finding class  →  KSPMScanner class  →  CLI (argparse)
                     ├── _check_hpa_security()          [v1.1.0]
                     ├── _check_service_mesh()          [v1.1.0]
                     ├── _check_deprecated_apis()       [v1.1.0]
-                    └── _check_runtime_security()      [v1.1.0]
+                    ├── _check_runtime_security()      [v1.1.0]
+                    └── _check_advanced_rbac()         [v1.3.0]
 ```
 
 ### Key Design Decisions
@@ -145,12 +146,18 @@ python kspm_scanner.py --context kind-kind
 - [x] **Per-finding compliance tags** in console, JSON, and HTML output
 - [x] **`compliance_summary()`** method and `compliance_summary` in JSON output
 
-### v1.3.0 — Advanced RBAC Analysis (KIEM-style)
-- [ ] **RBAC graph analysis**: Map SA → RoleBinding → Role → permissions
-- [ ] **Dormant permission detection**: SAs with bindings but no pod references
-- [ ] **Permission drift tracking**: Compare current RBAC state against a saved baseline
-- [ ] **Least-privilege recommendations**: Suggest narrowed roles based on actual API audit logs
-- [ ] **Cross-namespace escalation paths**: Detect multi-hop privilege escalation chains
+### v1.3.0 — Advanced RBAC Analysis (COMPLETE)
+- [x] **RBAC graph analysis**: Build SA → RoleBinding → Role → permissions graph, emit findings for dangerous patterns
+- [x] **Dormant permission detection** (K8S-RBAC-016): SAs with bindings but no running pod references
+- [x] **Cross-namespace escalation** (K8S-RBAC-017): SAs with dangerous cluster-wide permissions via ClusterRoleBindings
+- [x] **RBAC modification detection** (K8S-RBAC-018): SAs that can create/modify Roles/Bindings (escalation path)
+- [x] **Multi-hop escalation** (K8S-RBAC-019): SAs that can both create pods and access sensitive resources
+- [x] **Least-privilege analysis** (K8S-RBAC-020): Overly broad roles (>10 resources or many dangerous verbs)
+- [x] **Cross-scope admin detection** (K8S-RBAC-022): Users/Groups with admin roles across 3+ scopes
+- [x] **Orphaned bindings** (K8S-RBAC-023): Bindings referencing non-existent Roles/ClusterRoles
+- [x] **Aggregate role selector** (K8S-RBAC-024): Aggregate ClusterRoles with empty label selectors (match-all)
+- [x] **Permission drift tracking** (K8S-RBAC-025/026/027): `--baseline-save` / `--baseline-compare` CLI for RBAC state diff
+- [x] **ClusterRole reuse analysis** (K8S-RBAC-021): ClusterRoles bound in 3+ namespaces via RoleBindings
 
 ### v1.4.0 — Supply Chain & Image Security
 - [ ] **Image vulnerability scanning**: Integrate with Trivy/Grype for CVE scanning

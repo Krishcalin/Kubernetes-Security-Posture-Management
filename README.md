@@ -12,7 +12,9 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ## Features
 
-- **~120+ security checks** across 16 check groups
+- **~130+ security checks** across 17 check groups
+- **Advanced RBAC analysis** — graph-based escalation paths, dormant SAs, permission drift tracking
+- **RBAC baseline drift** — save & compare RBAC state across scans (`--baseline-save`/`--baseline-compare`)
 - **6 compliance frameworks** — CIS Benchmark, NSA/CISA, MITRE ATT&CK, SOC 2, PCI-DSS, NIST 800-190
 - **Compliance dashboard** — per-framework coverage metrics in HTML report
 - **Agentless** — connects via kubeconfig or in-cluster config
@@ -23,7 +25,7 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 
 ---
 
-## Check Groups (~120+ Rules)
+## Check Groups (~130+ Rules)
 
 | # | Category | Rule IDs | Key Checks |
 |---|----------|----------|------------|
@@ -43,6 +45,7 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 | 14 | **Service Mesh** | K8S-MESH-001 to 004 | Missing sidecar injection (Istio/Linkerd), permissive/disabled mTLS, missing AuthorizationPolicy, exposed mesh gateways |
 | 15 | **Deprecated APIs** | K8S-API-001 to 003 | Deprecated API versions in use, removed APIs still present, PodSecurityPolicy remnants |
 | 16 | **Runtime Security** | K8S-RC-001, K8S-EPH-001/002 | Non-existent RuntimeClass references, active ephemeral debug containers, privileged ephemeral containers |
+| 17 | **Advanced RBAC** | K8S-RBAC-016 to 027 | RBAC graph analysis, dormant SA detection, cross-namespace escalation paths, multi-hop privilege escalation, overly broad roles, orphaned bindings, aggregate role selectors, RBAC baseline drift tracking |
 
 ---
 
@@ -131,6 +134,12 @@ python kspm_scanner.py --kubeconfig /path/to/kubeconfig --html report.html
 
 # Verbose output for debugging
 python kspm_scanner.py -v --severity MEDIUM --html report.html
+
+# Save RBAC baseline for drift tracking
+python kspm_scanner.py --baseline-save rbac-baseline.json
+
+# Compare against a saved baseline (detects permission drift)
+python kspm_scanner.py --baseline-compare rbac-baseline.json --html report.html
 ```
 
 ### CLI Reference

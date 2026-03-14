@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kubernetes Security Posture Management (KSPM) Scanner  v1.2.0
+Kubernetes Security Posture Management (KSPM) Scanner  v1.3.0
 
 Agentless scanner that connects to a live Kubernetes cluster via the
 Kubernetes API and performs comprehensive security posture checks covering
@@ -20,7 +20,7 @@ Usage:
                            [--verbose] [--version]
 """
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 import os, sys, json, re, argparse, html as html_mod
 from datetime import datetime, timezone
@@ -201,6 +201,8 @@ class KSPMScanner:
         "K8S-NODE-001": "CIS 4.1.1",  "K8S-NODE-002": "CIS 4.2.6",
         "K8S-NODE-004": "CIS 4.2.4",  "K8S-NODE-005": "CIS 4.2.12",
         "K8S-PDB-001": "CIS 5.7.4",
+        # v1.3.0 additions
+        "K8S-RBAC-016": "CIS 5.1.6", "K8S-RBAC-020": "CIS 5.1.3",
     }
 
     # NSA/CISA Kubernetes Hardening Guide (v1.2, Aug 2022) mapping
@@ -251,6 +253,11 @@ class KSPMScanner:
         "K8S-NS-002": "NSA 2.8",    "K8S-NS-003": "NSA 2.8",
         "K8S-NS-004": "NSA 2.8",    "K8S-NS-005": "NSA 2.9",
         "K8S-NS-006": "NSA 2.9",
+        # v1.3.0 — Advanced RBAC
+        "K8S-RBAC-016": "NSA 3.8",  "K8S-RBAC-017": "NSA 3.2",
+        "K8S-RBAC-018": "NSA 3.4",  "K8S-RBAC-019": "NSA 3.4",
+        "K8S-RBAC-020": "NSA 3.2",  "K8S-RBAC-022": "NSA 3.1",
+        "K8S-RBAC-025": "NSA 3.1",  "K8S-RBAC-027": "NSA 3.1",
     }
 
     # MITRE ATT&CK for Containers mapping
@@ -308,6 +315,13 @@ class KSPMScanner:
         "K8S-PDB-002": "T1499",
         "K8S-PDB-003": "T1499",
         "K8S-HPA-001": "T1499",       # minReplicas=1
+        # v1.3.0 — Advanced RBAC
+        "K8S-RBAC-016": "T1078.004",  # Dormant SA (Valid Accounts)
+        "K8S-RBAC-017": "T1078.004",  # Cross-namespace SA
+        "K8S-RBAC-018": "T1078.004",  # RBAC modification (escalation)
+        "K8S-RBAC-019": "T1611",      # Multi-hop escalation
+        "K8S-RBAC-025": "T1098",      # Account Manipulation (drift)
+        "K8S-RBAC-027": "T1098",      # Permission expansion (drift)
     }
 
     # SOC 2 Trust Service Criteria mapping
@@ -354,6 +368,13 @@ class KSPMScanner:
         "K8S-POD-001": "CC6.8",   "K8S-POD-002": "CC6.8",
         "K8S-POD-003": "CC6.8",   "K8S-POD-006": "CC6.8",
         "K8S-POD-010": "CC6.8",
+        # v1.3.0 — Advanced RBAC
+        "K8S-RBAC-016": "CC6.1", "K8S-RBAC-017": "CC6.1",
+        "K8S-RBAC-018": "CC6.1", "K8S-RBAC-019": "CC6.1",
+        "K8S-RBAC-020": "CC6.1", "K8S-RBAC-022": "CC6.1",
+        "K8S-RBAC-023": "CC6.1", "K8S-RBAC-024": "CC6.1",
+        "K8S-RBAC-025": "CC7.2", "K8S-RBAC-026": "CC7.2",
+        "K8S-RBAC-027": "CC7.2",
     }
 
     # PCI-DSS v4.0 requirement mapping
@@ -393,6 +414,11 @@ class KSPMScanner:
         "K8S-CLUSTER-003": "PCI 10.2.1", "K8S-CLUSTER-004": "PCI 10.2.1",
         # Req 11 — Security Testing
         "K8S-ADM-001": "PCI 11.6.1", "K8S-ADM-005": "PCI 11.6.1",
+        # v1.3.0 — Advanced RBAC
+        "K8S-RBAC-016": "PCI 7.2.1", "K8S-RBAC-017": "PCI 7.2.2",
+        "K8S-RBAC-018": "PCI 7.2.4", "K8S-RBAC-019": "PCI 7.2.4",
+        "K8S-RBAC-020": "PCI 7.2.2", "K8S-RBAC-022": "PCI 7.2.1",
+        "K8S-RBAC-025": "PCI 10.2.1", "K8S-RBAC-027": "PCI 10.2.1",
     }
 
     # NIST SP 800-190 (Application Container Security Guide) mapping
@@ -429,6 +455,10 @@ class KSPMScanner:
         "K8S-NODE-001": "NIST 3.5.1",  "K8S-NODE-002": "NIST 3.5.1",
         "K8S-NODE-003": "NIST 3.5.2",  "K8S-NODE-004": "NIST 3.5.2",
         "K8S-NODE-005": "NIST 3.5.3",  "K8S-NODE-006": "NIST 3.5.3",
+        # v1.3.0 — Advanced RBAC
+        "K8S-RBAC-016": "NIST 3.3.5", "K8S-RBAC-017": "NIST 3.3.5",
+        "K8S-RBAC-018": "NIST 3.3.5", "K8S-RBAC-019": "NIST 3.3.5",
+        "K8S-RBAC-020": "NIST 3.3.5", "K8S-RBAC-022": "NIST 3.3.5",
     }
 
     def __init__(self, kubeconfig=None, context=None, namespaces=None,
@@ -587,6 +617,8 @@ class KSPMScanner:
         self._check_service_mesh()
         self._check_deprecated_apis()
         self._check_runtime_security()
+        # v1.3.0 check groups
+        self._check_advanced_rbac()
 
         print(f"[*] Scan complete. {len(self.findings)} findings identified.")
 
@@ -2780,6 +2812,520 @@ class KSPMScanner:
                             ))
 
     # ===================================================================
+    # CHECK GROUP 17: Advanced RBAC Analysis  (K8S-RBAC-016 to 027)  [v1.3.0]
+    # ===================================================================
+    def _check_advanced_rbac(self):
+        self._vprint("  [*] Checking advanced RBAC analysis ...")
+
+        # --- Collect all RBAC objects ---
+        try:
+            crbs = self.rbac_v1.list_cluster_role_binding().items
+        except ApiException:
+            crbs = []
+        try:
+            crs = self.rbac_v1.list_cluster_role().items
+        except ApiException:
+            crs = []
+        try:
+            rbs_all = self.rbac_v1.list_role_binding_for_all_namespaces().items
+        except ApiException:
+            rbs_all = []
+        try:
+            roles_all = self.rbac_v1.list_role_for_all_namespaces().items
+        except ApiException:
+            roles_all = []
+
+        namespaces = self._get_namespaces()
+
+        # --- Build role rules lookup: (kind, ns, name) → [rules] ---
+        role_rules = {}
+        for cr in crs:
+            role_rules[("ClusterRole", None, cr.metadata.name)] = cr.rules or []
+        for r in roles_all:
+            role_rules[("Role", r.metadata.namespace, r.metadata.name)] = r.rules or []
+
+        # --- Build RBAC graph: subject → [(binding, role_key, scope)] ---
+        # subject key: (kind, namespace, name)
+        rbac_graph = {}  # subject_key → list of {binding, role_key, scope, binding_ns}
+
+        for crb in crbs:
+            if not crb.role_ref:
+                continue
+            role_key = ("ClusterRole", None, crb.role_ref.name)
+            for subj in (crb.subjects or []):
+                sk = (subj.kind, subj.namespace or "", subj.name)
+                rbac_graph.setdefault(sk, []).append({
+                    "binding": crb.metadata.name,
+                    "binding_kind": "ClusterRoleBinding",
+                    "role_key": role_key,
+                    "scope": "cluster",
+                    "binding_ns": None,
+                })
+
+        for rb in rbs_all:
+            if not rb.role_ref:
+                continue
+            rb_ns = rb.metadata.namespace or "default"
+            if rb.role_ref.kind == "ClusterRole":
+                role_key = ("ClusterRole", None, rb.role_ref.name)
+            else:
+                role_key = ("Role", rb_ns, rb.role_ref.name)
+            for subj in (rb.subjects or []):
+                sk = (subj.kind, subj.namespace or rb_ns, subj.name)
+                rbac_graph.setdefault(sk, []).append({
+                    "binding": rb.metadata.name,
+                    "binding_kind": "RoleBinding",
+                    "role_key": role_key,
+                    "scope": f"namespace:{rb_ns}",
+                    "binding_ns": rb_ns,
+                })
+
+        # --- Collect running SAs per namespace ---
+        running_sas = set()  # (namespace, sa_name)
+        for ns in namespaces:
+            try:
+                pods = self.core_v1.list_namespaced_pod(ns).items
+                for p in pods:
+                    if p.spec:
+                        sa = p.spec.service_account_name or p.spec.service_account or "default"
+                        running_sas.add((ns, sa))
+            except ApiException:
+                pass
+
+        # --- Helper: extract effective permissions from a role ---
+        def _get_permissions(role_key):
+            rules = role_rules.get(role_key, [])
+            perms = []
+            for rule in rules:
+                verbs = list(rule.verbs or [])
+                resources = list(rule.resources or [])
+                api_groups = list(rule.api_groups or [])
+                perms.append({"verbs": verbs, "resources": resources, "api_groups": api_groups})
+            return perms
+
+        # --- Helper: check if permissions are dangerous ---
+        def _has_dangerous_perms(perms):
+            for p in perms:
+                if "*" in p["verbs"] and "*" in p["resources"]:
+                    return True
+                for r in p["resources"]:
+                    if r in SENSITIVE_RESOURCES and any(
+                        v in p["verbs"] for v in ["*", "create", "get", "list"]
+                    ):
+                        return True
+            return False
+
+        # --- Helper: check if role can create/modify roles/bindings ---
+        def _can_escalate(perms):
+            for p in perms:
+                rbac_resources = {"roles", "clusterroles", "rolebindings", "clusterrolebindings"}
+                mutate_verbs = {"create", "update", "patch", "*"}
+                if rbac_resources & set(p["resources"]) and mutate_verbs & set(p["verbs"]):
+                    return True
+                if "escalate" in p["verbs"] or "bind" in p["verbs"]:
+                    return True
+            return False
+
+        # =====================================================================
+        # K8S-RBAC-016: Dormant service accounts (bindings but no running pods)
+        # =====================================================================
+        for (sk_kind, sk_ns, sk_name), edges in rbac_graph.items():
+            if sk_kind != "ServiceAccount":
+                continue
+            if sk_name.startswith("system:"):
+                continue
+            if sk_ns in SYSTEM_NAMESPACES:
+                continue
+            if (sk_ns, sk_name) not in running_sas:
+                # Has bindings but no pod uses it
+                roles_bound = ", ".join(
+                    f"{e['role_key'][2]} ({e['scope']})" for e in edges
+                )
+                has_dangerous = any(
+                    _has_dangerous_perms(_get_permissions(e["role_key"]))
+                    for e in edges
+                )
+                severity = "HIGH" if has_dangerous else "MEDIUM"
+                self._add(Finding(
+                    "K8S-RBAC-016", "Dormant service account with active bindings",
+                    "Advanced RBAC", severity,
+                    self._res_path(sk_ns, "ServiceAccount", sk_name),
+                    None, f"bound roles: {roles_bound}",
+                    "Service account has RBAC bindings but no running pods reference it. "
+                    "Dormant SAs with permissions are latent attack vectors.",
+                    "Remove unused bindings or delete the service account if it is no longer needed.",
+                    "CWE-269",
+                ))
+
+        # =====================================================================
+        # K8S-RBAC-017: SA with cross-namespace ClusterRole access
+        # =====================================================================
+        for (sk_kind, sk_ns, sk_name), edges in rbac_graph.items():
+            if sk_kind != "ServiceAccount":
+                continue
+            if sk_name.startswith("system:") or sk_ns in SYSTEM_NAMESPACES:
+                continue
+            cluster_scope_edges = [e for e in edges if e["scope"] == "cluster"]
+            if cluster_scope_edges:
+                for e in cluster_scope_edges:
+                    perms = _get_permissions(e["role_key"])
+                    if _has_dangerous_perms(perms):
+                        self._add(Finding(
+                            "K8S-RBAC-017",
+                            "SA has dangerous cluster-wide permissions",
+                            "Advanced RBAC", "HIGH",
+                            self._res_path(sk_ns, "ServiceAccount", sk_name),
+                            None,
+                            f"via {e['binding_kind']}/{e['binding']} → {e['role_key'][2]}",
+                            f"Service account in namespace '{sk_ns}' has cluster-wide access to "
+                            f"sensitive resources via ClusterRoleBinding, enabling cross-namespace access.",
+                            "Replace ClusterRoleBinding with namespace-scoped RoleBindings. "
+                            "Restrict to only the namespaces the SA needs.",
+                            "CWE-269",
+                        ))
+
+        # =====================================================================
+        # K8S-RBAC-018: Privilege escalation path — SA can modify RBAC
+        # =====================================================================
+        for (sk_kind, sk_ns, sk_name), edges in rbac_graph.items():
+            if sk_kind != "ServiceAccount":
+                continue
+            if sk_name.startswith("system:") or sk_ns in SYSTEM_NAMESPACES:
+                continue
+            for e in edges:
+                perms = _get_permissions(e["role_key"])
+                if _can_escalate(perms):
+                    self._add(Finding(
+                        "K8S-RBAC-018",
+                        "SA can modify RBAC objects (escalation path)",
+                        "Advanced RBAC", "CRITICAL",
+                        self._res_path(sk_ns, "ServiceAccount", sk_name),
+                        None,
+                        f"via {e['role_key'][2]} ({e['scope']}): can create/modify roles/bindings",
+                        "Service account can create or modify Roles, ClusterRoles, or their bindings. "
+                        "This enables privilege escalation by granting itself additional permissions.",
+                        "Remove RBAC mutation permissions. Use dedicated admin SAs with break-glass procedures.",
+                        "CWE-269",
+                    ))
+
+        # =====================================================================
+        # K8S-RBAC-019: Multi-hop escalation — SA can create pods + has elevated role
+        # =====================================================================
+        for (sk_kind, sk_ns, sk_name), edges in rbac_graph.items():
+            if sk_kind != "ServiceAccount":
+                continue
+            if sk_name.startswith("system:") or sk_ns in SYSTEM_NAMESPACES:
+                continue
+            all_perms = []
+            for e in edges:
+                all_perms.extend(_get_permissions(e["role_key"]))
+            can_create_pods = any(
+                "pods" in p["resources"] and
+                any(v in p["verbs"] for v in ["create", "*"])
+                for p in all_perms
+            )
+            has_elevated = _has_dangerous_perms(all_perms)
+            if can_create_pods and has_elevated:
+                self._add(Finding(
+                    "K8S-RBAC-019",
+                    "Multi-hop escalation: pod creation + elevated permissions",
+                    "Advanced RBAC", "CRITICAL",
+                    self._res_path(sk_ns, "ServiceAccount", sk_name),
+                    None, "can create pods AND has access to sensitive resources",
+                    "Service account can both create pods and access sensitive resources. "
+                    "An attacker can create a pod with this SA to inherit its elevated permissions.",
+                    "Separate pod-creation and data-access roles. Use Pod Security Admission to restrict SA usage.",
+                    "CWE-269",
+                ))
+
+        # =====================================================================
+        # K8S-RBAC-020: Overly broad Role (> 10 resources or > 5 write verbs)
+        # =====================================================================
+        for role_key, rules in role_rules.items():
+            kind, ns, name = role_key
+            if name.startswith("system:") or name in ("cluster-admin", "admin", "edit", "view"):
+                continue
+            total_resources = set()
+            total_write_verbs = set()
+            for rule in rules:
+                for r in (rule.resources or []):
+                    total_resources.add(r)
+                for v in (rule.verbs or []):
+                    if v in DANGEROUS_VERBS or v == "*":
+                        total_write_verbs.add(v)
+            if len(total_resources) > 10 or (
+                len(total_write_verbs) >= 4 and len(total_resources) > 5
+            ):
+                res_path = self._res_path(ns, kind, name)
+                self._add(Finding(
+                    "K8S-RBAC-020",
+                    "Overly broad role (least-privilege violation)",
+                    "Advanced RBAC", "MEDIUM", res_path, None,
+                    f"resources: {len(total_resources)}, dangerous verbs: {sorted(total_write_verbs)}",
+                    f"Role '{name}' grants access to {len(total_resources)} resources with "
+                    f"dangerous verbs. Consider splitting into narrower purpose-specific roles.",
+                    "Apply least-privilege: create separate roles for read-only, write, and admin operations.",
+                    "CWE-250",
+                ))
+
+        # =====================================================================
+        # K8S-RBAC-021: Role grants same permissions across all namespaces
+        # =====================================================================
+        # Find RoleBindings that bind the same ClusterRole in 3+ namespaces
+        cr_ns_usage = {}  # clusterrole_name → set of namespaces
+        for rb in rbs_all:
+            if rb.role_ref and rb.role_ref.kind == "ClusterRole":
+                cr_name = rb.role_ref.name
+                rb_ns = rb.metadata.namespace or "default"
+                if rb_ns not in SYSTEM_NAMESPACES:
+                    cr_ns_usage.setdefault(cr_name, set()).add(rb_ns)
+        for cr_name, ns_set in cr_ns_usage.items():
+            if cr_name.startswith("system:") or cr_name in ("admin", "edit", "view"):
+                continue
+            if len(ns_set) >= 3:
+                self._add(Finding(
+                    "K8S-RBAC-021",
+                    "ClusterRole bound in many namespaces via RoleBindings",
+                    "Advanced RBAC", "LOW",
+                    self._res_path(None, "ClusterRole", cr_name),
+                    None,
+                    f"bound in {len(ns_set)} namespaces: {', '.join(sorted(ns_set)[:5])}{'...' if len(ns_set) > 5 else ''}",
+                    "ClusterRole is bound via RoleBindings in multiple namespaces. "
+                    "Consider using a ClusterRoleBinding if cluster-wide access is intended, "
+                    "or audit whether each namespace truly needs this role.",
+                    "Review per-namespace necessity. Consolidate or replace with namespace-specific Roles.",
+                ))
+
+        # =====================================================================
+        # K8S-RBAC-022: User/Group with admin across namespaces
+        # =====================================================================
+        for (sk_kind, sk_ns, sk_name), edges in rbac_graph.items():
+            if sk_kind not in ("User", "Group"):
+                continue
+            if sk_name.startswith("system:"):
+                continue
+            admin_scopes = []
+            for e in edges:
+                role_name = e["role_key"][2]
+                if role_name in ("cluster-admin", "admin") or "admin" in role_name.lower():
+                    admin_scopes.append(e["scope"])
+            if len(admin_scopes) >= 3:
+                self._add(Finding(
+                    "K8S-RBAC-022",
+                    f"{sk_kind} has admin in multiple scopes",
+                    "Advanced RBAC", "HIGH",
+                    self._res_path(None, sk_kind, sk_name),
+                    None,
+                    f"admin in {len(admin_scopes)} scopes: {', '.join(admin_scopes[:5])}",
+                    f"{sk_kind} '{sk_name}' holds admin-level roles across {len(admin_scopes)} scopes, "
+                    f"creating a high-impact blast radius if the account is compromised.",
+                    "Apply least-privilege per namespace. Use separate identities per team/scope.",
+                    "CWE-250",
+                ))
+
+        # =====================================================================
+        # K8S-RBAC-023: Binding references non-existent role
+        # =====================================================================
+        existing_roles = set(role_rules.keys())
+        for crb in crbs:
+            if not crb.role_ref or crb.metadata.name.startswith("system:"):
+                continue
+            key = ("ClusterRole", None, crb.role_ref.name)
+            if key not in existing_roles:
+                self._add(Finding(
+                    "K8S-RBAC-023",
+                    "ClusterRoleBinding references non-existent ClusterRole",
+                    "Advanced RBAC", "MEDIUM",
+                    self._res_path(None, "ClusterRoleBinding", crb.metadata.name),
+                    None, f"roleRef: {crb.role_ref.name}",
+                    "Binding references a ClusterRole that does not exist. "
+                    "This may indicate a deleted role or misconfiguration.",
+                    "Delete orphaned bindings or create the missing ClusterRole.",
+                ))
+        for rb in rbs_all:
+            if not rb.role_ref or rb.metadata.name.startswith("system:"):
+                continue
+            rb_ns = rb.metadata.namespace or "default"
+            if rb.role_ref.kind == "ClusterRole":
+                key = ("ClusterRole", None, rb.role_ref.name)
+            else:
+                key = ("Role", rb_ns, rb.role_ref.name)
+            if key not in existing_roles:
+                self._add(Finding(
+                    "K8S-RBAC-023",
+                    "RoleBinding references non-existent role",
+                    "Advanced RBAC", "MEDIUM",
+                    self._res_path(rb_ns, "RoleBinding", rb.metadata.name),
+                    None, f"roleRef: {rb.role_ref.kind}/{rb.role_ref.name}",
+                    "Binding references a role that does not exist in its namespace. "
+                    "This may indicate stale configuration.",
+                    "Delete orphaned bindings or create the missing role.",
+                ))
+
+        # =====================================================================
+        # K8S-RBAC-024: Aggregate ClusterRole with broad label selectors
+        # =====================================================================
+        for cr in crs:
+            if cr.metadata.name.startswith("system:"):
+                continue
+            agg = cr.aggregation_rule
+            if agg and agg.cluster_role_selectors:
+                for sel in agg.cluster_role_selectors:
+                    labels = sel.match_labels or {}
+                    exprs = sel.match_expressions or []
+                    if not labels and not exprs:
+                        self._add(Finding(
+                            "K8S-RBAC-024",
+                            "Aggregate ClusterRole with empty selector",
+                            "Advanced RBAC", "HIGH",
+                            self._res_path(None, "ClusterRole", cr.metadata.name),
+                            None, "aggregationRule with empty matchLabels",
+                            "Aggregate ClusterRole uses an empty label selector, which matches ALL ClusterRoles. "
+                            "Any ClusterRole created in the cluster will be aggregated into this role.",
+                            "Add specific matchLabels to the aggregation rule to limit scope.",
+                            "CWE-269",
+                        ))
+
+        # Store the RBAC graph for baseline operations
+        self._rbac_graph = rbac_graph
+        self._role_rules = role_rules
+
+    def save_rbac_baseline(self, path: str):
+        """Save current RBAC state as a JSON baseline for drift comparison."""
+        if not hasattr(self, "_rbac_graph"):
+            self._warn("Run scan() before saving baseline")
+            return
+
+        baseline = {"version": VERSION, "generated": datetime.now(timezone.utc).isoformat(),
+                     "cluster": self.cluster_name, "subjects": {}, "roles": {}}
+
+        for (sk_kind, sk_ns, sk_name), edges in self._rbac_graph.items():
+            key = f"{sk_kind}:{sk_ns}:{sk_name}"
+            baseline["subjects"][key] = [
+                {"binding": e["binding"], "role": e["role_key"][2],
+                 "scope": e["scope"]}
+                for e in edges
+            ]
+
+        for (kind, ns, name), rules in self._role_rules.items():
+            key = f"{kind}:{ns or ''}:{name}"
+            baseline["roles"][key] = [
+                {"verbs": list(r.verbs or []),
+                 "resources": list(r.resources or []),
+                 "api_groups": list(r.api_groups or [])}
+                for r in rules
+            ]
+
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(baseline, fh, indent=2)
+        print(f"\n[+] RBAC baseline saved to: {os.path.abspath(path)}")
+
+    def compare_rbac_baseline(self, path: str):
+        """Compare current RBAC state against a saved baseline and emit drift findings."""
+        if not hasattr(self, "_rbac_graph"):
+            self._warn("Run scan() before comparing baseline")
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                baseline = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._warn(f"Cannot load baseline: {exc}")
+            return
+
+        baseline_subjects = baseline.get("subjects", {})
+        baseline_roles = baseline.get("roles", {})
+
+        # --- K8S-RBAC-025: New bindings since baseline ---
+        current_subjects = {}
+        for (sk_kind, sk_ns, sk_name), edges in self._rbac_graph.items():
+            key = f"{sk_kind}:{sk_ns}:{sk_name}"
+            current_subjects[key] = set(
+                f"{e['binding']}→{e['role_key'][2]}" for e in edges
+            )
+
+        for subj_key, current_edges in current_subjects.items():
+            old_edges = set(
+                f"{e['binding']}→{e['role']}"
+                for e in baseline_subjects.get(subj_key, [])
+            )
+            new_edges = current_edges - old_edges
+            if new_edges:
+                parts = subj_key.split(":", 2)
+                sk_kind, sk_ns, sk_name = parts[0], parts[1], parts[2]
+                self._add(Finding(
+                    "K8S-RBAC-025",
+                    "New RBAC binding since baseline (drift detected)",
+                    "RBAC Drift", "HIGH",
+                    self._res_path(sk_ns or None, sk_kind, sk_name),
+                    None, f"new bindings: {', '.join(sorted(new_edges))}",
+                    "Subject has new role bindings that did not exist in the saved baseline. "
+                    "This may indicate unauthorized permission expansion.",
+                    "Review new bindings. If authorized, update the baseline with --baseline-save.",
+                    "CWE-269",
+                ))
+
+        # --- K8S-RBAC-026: Removed bindings since baseline ---
+        for subj_key, old_data in baseline_subjects.items():
+            old_edges = set(f"{e['binding']}→{e['role']}" for e in old_data)
+            current_edges = current_subjects.get(subj_key, set())
+            removed = old_edges - current_edges
+            if removed and subj_key in current_subjects:
+                parts = subj_key.split(":", 2)
+                sk_kind, sk_ns, sk_name = parts[0], parts[1], parts[2]
+                self._add(Finding(
+                    "K8S-RBAC-026",
+                    "RBAC binding removed since baseline (drift detected)",
+                    "RBAC Drift", "LOW",
+                    self._res_path(sk_ns or None, sk_kind, sk_name),
+                    None, f"removed bindings: {', '.join(sorted(removed))}",
+                    "Subject lost bindings compared to baseline. Verify this was intentional.",
+                    "If intentional, update the baseline with --baseline-save.",
+                ))
+
+        # --- K8S-RBAC-027: Role permissions expanded since baseline ---
+        for role_key_str, old_rules in baseline_roles.items():
+            parts = role_key_str.split(":", 2)
+            kind, ns, name = parts[0], parts[1] or None, parts[2]
+            current_rules_raw = self._role_rules.get((kind, ns, name), [])
+            current_verbs = set()
+            current_resources = set()
+            for rule in current_rules_raw:
+                for v in (rule.verbs or []):
+                    current_verbs.add(v)
+                for r in (rule.resources or []):
+                    current_resources.add(r)
+            old_verbs = set()
+            old_resources = set()
+            for rule in old_rules:
+                for v in rule.get("verbs", []):
+                    old_verbs.add(v)
+                for r in rule.get("resources", []):
+                    old_resources.add(r)
+            new_verbs = current_verbs - old_verbs
+            new_resources = current_resources - old_resources
+            if new_verbs or new_resources:
+                detail_parts = []
+                if new_verbs:
+                    detail_parts.append(f"new verbs: {sorted(new_verbs)}")
+                if new_resources:
+                    detail_parts.append(f"new resources: {sorted(new_resources)}")
+                self._add(Finding(
+                    "K8S-RBAC-027",
+                    "Role permissions expanded since baseline (drift detected)",
+                    "RBAC Drift", "HIGH",
+                    self._res_path(ns, kind, name),
+                    None, "; ".join(detail_parts),
+                    f"Role '{name}' has gained additional verbs or resources compared to the baseline. "
+                    f"This may indicate unauthorized permission creep.",
+                    "Review expanded permissions. If authorized, update the baseline.",
+                    "CWE-269",
+                ))
+
+        gen = baseline.get("generated", "unknown")
+        print(f"[*] Baseline comparison complete (baseline from: {gen})")
+
+    # ===================================================================
     # Reporting
     # ===================================================================
     def summary(self) -> dict:
@@ -3117,6 +3663,10 @@ def main():
                         help="Save findings as JSON to FILE")
     parser.add_argument("--html", metavar="FILE",
                         help="Save findings as HTML report to FILE")
+    parser.add_argument("--baseline-save", metavar="FILE",
+                        help="Save current RBAC state as baseline for drift detection")
+    parser.add_argument("--baseline-compare", metavar="FILE",
+                        help="Compare current RBAC against a saved baseline")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Verbose output")
     parser.add_argument("--version", action="version",
@@ -3143,9 +3693,15 @@ def main():
     )
 
     scanner.scan()
+
+    if args.baseline_compare:
+        scanner.compare_rbac_baseline(args.baseline_compare)
+
     scanner.filter_severity(args.severity)
     scanner.print_report()
 
+    if args.baseline_save:
+        scanner.save_rbac_baseline(args.baseline_save)
     if args.json:
         scanner.save_json(args.json)
     if args.html:
