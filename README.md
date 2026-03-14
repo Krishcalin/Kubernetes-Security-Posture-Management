@@ -13,7 +13,8 @@ An open-source, agentless Python-based **Kubernetes Security Posture Management 
 ## Features
 
 - **~120+ security checks** across 16 check groups
-- **CIS Kubernetes Benchmark** mapping for 25+ rules
+- **6 compliance frameworks** — CIS Benchmark, NSA/CISA, MITRE ATT&CK, SOC 2, PCI-DSS, NIST 800-190
+- **Compliance dashboard** — per-framework coverage metrics in HTML report
 - **Agentless** — connects via kubeconfig or in-cluster config
 - **All workload types** — Deployments, StatefulSets, DaemonSets, Jobs, CronJobs
 - **Managed cluster support** — graceful handling for EKS, GKE, AKS where API server pods aren't visible
@@ -63,6 +64,36 @@ Rules are mapped to CIS Kubernetes Benchmark sections where applicable:
 | K8S-NODE-002 | CIS 4.2.6 | Container runtime version |
 | K8S-NODE-005 | CIS 4.2.12 | Control plane taints |
 | ... | ... | 25+ mappings total |
+
+---
+
+## Compliance Frameworks (v1.2.0)
+
+Every finding is mapped to applicable controls across **6 industry compliance frameworks**. The HTML report includes a compliance dashboard with per-framework coverage metrics.
+
+| Framework | Reference Format | Mapped Rules | Scope |
+|-----------|-----------------|--------------|-------|
+| **CIS Kubernetes Benchmark** | CIS x.x.x | 25+ | Kubernetes hardening best practices |
+| **NSA/CISA Hardening Guide** (v1.2) | NSA x.x | 70+ | US government container hardening |
+| **MITRE ATT&CK for Containers** | Txxxx | 45+ | Adversary tactics/techniques |
+| **SOC 2 Trust Services** | CCx.x / A1.x | 65+ | Service organization controls |
+| **PCI-DSS v4.0** | PCI x.x.x | 45+ | Payment card industry requirements |
+| **NIST SP 800-190** | NIST 3.x.x | 45+ | Application container security guide |
+
+### Console Output
+Framework references are shown inline per finding:
+```
+[CRITICAL]  K8S-POD-001  Privileged container
+  Resource  : production/Deployment/api-server/main
+  Detail    : privileged: true
+  Compliance: CIS: CIS 5.2.1, NSA/CISA: NSA 1.1, MITRE: T1611, SOC 2: CC6.8, PCI-DSS: PCI 2.2.1, NIST 800-190: NIST 3.4.1
+```
+
+### JSON Output
+Each finding includes a `compliance` object and the report includes a `compliance_summary` section.
+
+### HTML Report
+Interactive compliance dashboard with coverage cards per framework, progress bars, and per-finding compliance tags.
 
 ---
 

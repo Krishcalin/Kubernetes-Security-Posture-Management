@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kubernetes Security Posture Management (KSPM) Scanner  v1.1.0
+Kubernetes Security Posture Management (KSPM) Scanner  v1.2.0
 
 Agentless scanner that connects to a live Kubernetes cluster via the
 Kubernetes API and performs comprehensive security posture checks covering
@@ -20,7 +20,7 @@ Usage:
                            [--verbose] [--version]
 """
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import os, sys, json, re, argparse, html as html_mod
 from datetime import datetime, timezone
@@ -203,6 +203,234 @@ class KSPMScanner:
         "K8S-PDB-001": "CIS 5.7.4",
     }
 
+    # NSA/CISA Kubernetes Hardening Guide (v1.2, Aug 2022) mapping
+    NSA_CISA_MAP = {
+        # Section 1 — Kubernetes Pod Security
+        "K8S-POD-001": "NSA 1.1",   "K8S-POD-002": "NSA 1.2",
+        "K8S-POD-003": "NSA 1.3",   "K8S-POD-004": "NSA 1.3",
+        "K8S-POD-005": "NSA 1.3",   "K8S-POD-006": "NSA 1.4",
+        "K8S-POD-007": "NSA 1.5",   "K8S-POD-009": "NSA 1.5",
+        "K8S-POD-010": "NSA 1.6",   "K8S-POD-011": "NSA 1.7",
+        "K8S-POD-012": "NSA 1.8",   "K8S-POD-013": "NSA 1.8",
+        "K8S-POD-014": "NSA 1.8",   "K8S-POD-023": "NSA 1.9",
+        "K8S-POD-024": "NSA 1.9",   "K8S-POD-025": "NSA 1.9",
+        "K8S-IMG-001": "NSA 1.10",  "K8S-IMG-002": "NSA 1.10",
+        "K8S-IMG-003": "NSA 1.10",  "K8S-IMG-004": "NSA 1.11",
+        "K8S-IMG-005": "NSA 1.11",
+        # Section 2 — Network Separation and Hardening
+        "K8S-NET-001": "NSA 2.1",   "K8S-NET-002": "NSA 2.1",
+        "K8S-NET-003": "NSA 2.1",   "K8S-NET-004": "NSA 2.2",
+        "K8S-NET-005": "NSA 2.2",   "K8S-NET-006": "NSA 2.3",
+        "K8S-NET-007": "NSA 2.3",   "K8S-NET-008": "NSA 2.3",
+        "K8S-NET-009": "NSA 2.4",   "K8S-NET-010": "NSA 2.4",
+        "K8S-CLUSTER-002": "NSA 2.5", "K8S-CLUSTER-001": "NSA 2.6",
+        "K8S-MESH-001": "NSA 2.7",  "K8S-MESH-002": "NSA 2.7",
+        "K8S-MESH-003": "NSA 2.7",
+        # Section 3 — Authentication and Authorization
+        "K8S-RBAC-001": "NSA 3.1",  "K8S-RBAC-002": "NSA 3.2",
+        "K8S-RBAC-003": "NSA 3.2",  "K8S-RBAC-004": "NSA 3.2",
+        "K8S-RBAC-005": "NSA 3.2",  "K8S-RBAC-006": "NSA 3.3",
+        "K8S-RBAC-007": "NSA 3.3",  "K8S-RBAC-008": "NSA 3.4",
+        "K8S-RBAC-009": "NSA 3.4",  "K8S-RBAC-010": "NSA 3.4",
+        "K8S-RBAC-011": "NSA 3.5",  "K8S-RBAC-012": "NSA 3.5",
+        "K8S-RBAC-013": "NSA 3.6",  "K8S-RBAC-014": "NSA 3.6",
+        "K8S-RBAC-015": "NSA 3.6",
+        "K8S-SA-001": "NSA 3.7",    "K8S-SA-002": "NSA 3.7",
+        "K8S-SA-003": "NSA 3.7",    "K8S-SA-004": "NSA 3.8",
+        "K8S-SECRET-001": "NSA 3.9", "K8S-SECRET-005": "NSA 3.9",
+        "K8S-SECRET-006": "NSA 3.9",
+        # Section 4 — Audit Logging and Threat Detection
+        "K8S-CLUSTER-003": "NSA 4.1", "K8S-CLUSTER-004": "NSA 4.1",
+        "K8S-CLUSTER-005": "NSA 4.2",
+        # Section 5 — Upgrading and Application Security Practices
+        "K8S-NODE-001": "NSA 5.1",  "K8S-NODE-002": "NSA 5.1",
+        "K8S-NODE-003": "NSA 5.1",  "K8S-NODE-006": "NSA 5.2",
+        "K8S-API-001": "NSA 5.3",   "K8S-API-002": "NSA 5.3",
+        "K8S-API-003": "NSA 5.3",
+        # Namespace isolation
+        "K8S-NS-002": "NSA 2.8",    "K8S-NS-003": "NSA 2.8",
+        "K8S-NS-004": "NSA 2.8",    "K8S-NS-005": "NSA 2.9",
+        "K8S-NS-006": "NSA 2.9",
+    }
+
+    # MITRE ATT&CK for Containers mapping
+    MITRE_MAP = {
+        # TA0001 — Initial Access
+        "K8S-CLUSTER-001": "T1190",   # Exploit Public-Facing Application (anonymous API)
+        "K8S-CLUSTER-002": "T1190",   # Dashboard exposure
+        "K8S-NET-004": "T1190",       # LoadBalancer exposure
+        "K8S-NET-005": "T1190",       # NodePort exposure
+        "K8S-MESH-004": "T1190",      # Exposed mesh gateways
+        # TA0002 — Execution
+        "K8S-RBAC-005": "T1609",      # Container Administration Command (exec/attach)
+        "K8S-EPH-001": "T1609",       # Ephemeral debug containers
+        "K8S-EPH-002": "T1609",       # Privileged ephemeral containers
+        # TA0003 — Persistence
+        "K8S-RBAC-014": "T1078.004",  # SA token creation (Valid Accounts: Cloud)
+        "K8S-RBAC-015": "T1078.004",
+        "K8S-SA-001": "T1078.004",    # Default SA abuse
+        "K8S-SA-003": "T1078.004",    # SA bound to cluster-admin
+        # TA0004 — Privilege Escalation
+        "K8S-POD-001": "T1611",       # Escape to Host (privileged containers)
+        "K8S-POD-003": "T1611",       # hostNetwork
+        "K8S-POD-004": "T1611",       # hostPID
+        "K8S-POD-005": "T1611",       # hostIPC
+        "K8S-POD-006": "T1611",       # allowPrivilegeEscalation
+        "K8S-POD-007": "T1611",       # SYS_ADMIN/ALL capabilities
+        "K8S-RBAC-009": "T1078.004",  # Escalate verb
+        "K8S-RBAC-010": "T1078.004",  # Bind verb
+        "K8S-RBAC-011": "T1078.004",  # Impersonate verb
+        "K8S-RBAC-001": "T1078.004",  # Cluster-admin binding
+        "K8S-PV-001": "T1611",        # hostPath volumes
+        # TA0005 — Defense Evasion
+        "K8S-CLUSTER-003": "T1562.001", # Impair Defenses: Disable/Modify Tools (no audit)
+        "K8S-CLUSTER-004": "T1562.001", # Missing admission controllers
+        "K8S-ADM-001": "T1562.001",   # Webhook failurePolicy Ignore
+        "K8S-ADM-005": "T1562.001",   # No validating webhooks
+        "K8S-API-003": "T1562.001",   # PodSecurityPolicy remnants
+        # TA0006 — Credential Access
+        "K8S-SECRET-001": "T1552.007", # Container API (secrets in env vars)
+        "K8S-SECRET-005": "T1552.007",
+        "K8S-SECRET-006": "T1552.007",
+        "K8S-RBAC-004": "T1552.007",  # Secrets access
+        "K8S-CLUSTER-005": "T1552.004", # Unsecured Credentials (no encryption at rest)
+        "K8S-SA-002": "T1528",        # Steal Application Access Token
+        # TA0007 — Discovery
+        "K8S-RBAC-002": "T1613",      # Container and Resource Discovery (wildcard)
+        "K8S-RBAC-003": "T1613",
+        # TA0008 — Lateral Movement
+        "K8S-NET-001": "T1210",       # Exploitation of Remote Services (no netpol)
+        "K8S-NET-002": "T1210",       # Allow-all ingress
+        "K8S-NET-003": "T1210",       # Allow-all egress
+        "K8S-MESH-002": "T1557",      # Adversary-in-the-Middle (permissive mTLS)
+        # TA0040 — Impact
+        "K8S-PDB-001": "T1499",       # Endpoint DoS (no PDB)
+        "K8S-PDB-002": "T1499",
+        "K8S-PDB-003": "T1499",
+        "K8S-HPA-001": "T1499",       # minReplicas=1
+    }
+
+    # SOC 2 Trust Service Criteria mapping
+    SOC2_MAP = {
+        # CC6 — Logical and Physical Access Controls
+        "K8S-RBAC-001": "CC6.1",  "K8S-RBAC-002": "CC6.1",
+        "K8S-RBAC-003": "CC6.1",  "K8S-RBAC-004": "CC6.1",
+        "K8S-RBAC-005": "CC6.1",  "K8S-RBAC-006": "CC6.1",
+        "K8S-RBAC-007": "CC6.1",  "K8S-RBAC-008": "CC6.3",
+        "K8S-RBAC-009": "CC6.1",  "K8S-RBAC-010": "CC6.1",
+        "K8S-RBAC-011": "CC6.3",  "K8S-RBAC-012": "CC6.3",
+        "K8S-RBAC-013": "CC6.3",  "K8S-RBAC-014": "CC6.3",
+        "K8S-RBAC-015": "CC6.3",
+        "K8S-SA-001": "CC6.1",    "K8S-SA-002": "CC6.1",
+        "K8S-SA-003": "CC6.1",    "K8S-SA-004": "CC6.1",
+        "K8S-CLUSTER-001": "CC6.1", "K8S-CLUSTER-002": "CC6.1",
+        "K8S-SECRET-001": "CC6.7", "K8S-SECRET-005": "CC6.7",
+        "K8S-SECRET-006": "CC6.7", "K8S-CLUSTER-005": "CC6.7",
+        "K8S-MESH-002": "CC6.7",
+        # CC7 — System Operations
+        "K8S-CLUSTER-003": "CC7.2", "K8S-CLUSTER-004": "CC7.2",
+        "K8S-ADM-001": "CC7.2",    "K8S-ADM-005": "CC7.2",
+        "K8S-NODE-001": "CC7.1",   "K8S-NODE-002": "CC7.1",
+        "K8S-NODE-003": "CC7.1",
+        # CC8 — Change Management
+        "K8S-API-001": "CC8.1",    "K8S-API-002": "CC8.1",
+        "K8S-API-003": "CC8.1",   "K8S-IMG-001": "CC8.1",
+        "K8S-IMG-002": "CC8.1",    "K8S-IMG-003": "CC8.1",
+        "K8S-IMG-004": "CC8.1",    "K8S-IMG-005": "CC8.1",
+        # A1 — Availability
+        "K8S-PDB-001": "A1.2",    "K8S-PDB-002": "A1.2",
+        "K8S-PDB-003": "A1.2",    "K8S-HPA-001": "A1.2",
+        "K8S-HPA-002": "A1.2",    "K8S-HPA-003": "A1.2",
+        "K8S-HPA-004": "A1.2",    "K8S-POD-012": "A1.2",
+        "K8S-POD-013": "A1.2",    "K8S-POD-014": "A1.2",
+        # CC6 — Network
+        "K8S-NET-001": "CC6.6",   "K8S-NET-002": "CC6.6",
+        "K8S-NET-003": "CC6.6",   "K8S-NET-004": "CC6.6",
+        "K8S-NET-005": "CC6.6",   "K8S-NET-006": "CC6.6",
+        "K8S-NS-002": "CC6.6",    "K8S-NS-003": "CC6.6",
+        "K8S-NS-004": "CC6.6",    "K8S-NS-005": "CC6.6",
+        "K8S-NS-006": "CC6.6",
+        # CC6 — Pod Hardening
+        "K8S-POD-001": "CC6.8",   "K8S-POD-002": "CC6.8",
+        "K8S-POD-003": "CC6.8",   "K8S-POD-006": "CC6.8",
+        "K8S-POD-010": "CC6.8",
+    }
+
+    # PCI-DSS v4.0 requirement mapping
+    PCIDSS_MAP = {
+        # Req 1 — Network Security Controls
+        "K8S-NET-001": "PCI 1.2.1", "K8S-NET-002": "PCI 1.2.1",
+        "K8S-NET-003": "PCI 1.2.1", "K8S-NET-004": "PCI 1.3.1",
+        "K8S-NET-005": "PCI 1.3.1", "K8S-NET-006": "PCI 1.3.2",
+        "K8S-NS-002": "PCI 1.2.5",  "K8S-NS-003": "PCI 1.2.5",
+        "K8S-MESH-002": "PCI 1.4.2",
+        # Req 2 — Secure Configuration
+        "K8S-POD-001": "PCI 2.2.1", "K8S-POD-002": "PCI 2.2.1",
+        "K8S-POD-003": "PCI 2.2.1", "K8S-POD-006": "PCI 2.2.1",
+        "K8S-POD-010": "PCI 2.2.1",
+        "K8S-CLUSTER-001": "PCI 2.2.2", "K8S-CLUSTER-002": "PCI 2.2.2",
+        "K8S-CLUSTER-006": "PCI 2.2.4",
+        "K8S-CLUSTER-007": "PCI 2.2.2",
+        "K8S-NODE-005": "PCI 2.2.1",
+        # Req 3 — Protect Stored Data
+        "K8S-CLUSTER-005": "PCI 3.5.1", "K8S-SECRET-001": "PCI 3.5.1",
+        "K8S-SECRET-005": "PCI 3.5.1", "K8S-SECRET-006": "PCI 3.5.1",
+        # Req 6 — Secure Development
+        "K8S-IMG-001": "PCI 6.3.2", "K8S-IMG-002": "PCI 6.3.2",
+        "K8S-IMG-004": "PCI 6.3.2", "K8S-IMG-005": "PCI 6.3.2",
+        "K8S-API-001": "PCI 6.3.1", "K8S-API-002": "PCI 6.3.1",
+        "K8S-NODE-001": "PCI 6.3.3", "K8S-NODE-002": "PCI 6.3.3",
+        # Req 7 — Restrict Access
+        "K8S-RBAC-001": "PCI 7.2.1", "K8S-RBAC-002": "PCI 7.2.2",
+        "K8S-RBAC-003": "PCI 7.2.2", "K8S-RBAC-004": "PCI 7.2.2",
+        "K8S-RBAC-005": "PCI 7.2.2", "K8S-RBAC-008": "PCI 7.2.4",
+        "K8S-SA-001": "PCI 7.2.1",  "K8S-SA-002": "PCI 7.2.1",
+        "K8S-SA-003": "PCI 7.2.1",
+        # Req 8 — Authentication
+        "K8S-RBAC-011": "PCI 8.2.1", "K8S-RBAC-012": "PCI 8.2.1",
+        "K8S-RBAC-013": "PCI 8.2.3", "K8S-RBAC-014": "PCI 8.2.3",
+        # Req 10 — Logging and Monitoring
+        "K8S-CLUSTER-003": "PCI 10.2.1", "K8S-CLUSTER-004": "PCI 10.2.1",
+        # Req 11 — Security Testing
+        "K8S-ADM-001": "PCI 11.6.1", "K8S-ADM-005": "PCI 11.6.1",
+    }
+
+    # NIST SP 800-190 (Application Container Security Guide) mapping
+    NIST_800_190_MAP = {
+        # 3.1 — Image Risks
+        "K8S-IMG-001": "NIST 3.1.1", "K8S-IMG-002": "NIST 3.1.1",
+        "K8S-IMG-003": "NIST 3.1.2", "K8S-IMG-004": "NIST 3.1.3",
+        "K8S-IMG-005": "NIST 3.1.3",
+        "K8S-POD-002": "NIST 3.1.4", "K8S-POD-007": "NIST 3.1.4",
+        "K8S-POD-009": "NIST 3.1.4",
+        "K8S-SECRET-001": "NIST 3.1.5", "K8S-SECRET-005": "NIST 3.1.5",
+        # 3.2 — Registry Risks
+        "K8S-IMG-004": "NIST 3.2.1",
+        # 3.3 — Orchestrator Risks
+        "K8S-CLUSTER-001": "NIST 3.3.1", "K8S-CLUSTER-002": "NIST 3.3.1",
+        "K8S-CLUSTER-003": "NIST 3.3.2", "K8S-CLUSTER-004": "NIST 3.3.2",
+        "K8S-CLUSTER-005": "NIST 3.3.3", "K8S-CLUSTER-006": "NIST 3.3.4",
+        "K8S-RBAC-001": "NIST 3.3.5",  "K8S-RBAC-002": "NIST 3.3.5",
+        "K8S-RBAC-003": "NIST 3.3.5",  "K8S-RBAC-008": "NIST 3.3.5",
+        "K8S-NET-001": "NIST 3.3.6",   "K8S-NET-002": "NIST 3.3.6",
+        "K8S-NET-003": "NIST 3.3.6",   "K8S-NS-002": "NIST 3.3.7",
+        "K8S-NS-003": "NIST 3.3.7",    "K8S-NS-005": "NIST 3.3.7",
+        "K8S-ADM-001": "NIST 3.3.8",   "K8S-ADM-005": "NIST 3.3.8",
+        "K8S-API-001": "NIST 3.3.9",   "K8S-API-002": "NIST 3.3.9",
+        # 3.4 — Container Risks
+        "K8S-POD-001": "NIST 3.4.1",   "K8S-POD-003": "NIST 3.4.1",
+        "K8S-POD-004": "NIST 3.4.1",   "K8S-POD-005": "NIST 3.4.1",
+        "K8S-POD-006": "NIST 3.4.2",   "K8S-POD-010": "NIST 3.4.3",
+        "K8S-POD-011": "NIST 3.4.3",   "K8S-POD-012": "NIST 3.4.4",
+        "K8S-POD-013": "NIST 3.4.4",   "K8S-POD-014": "NIST 3.4.4",
+        "K8S-PV-001": "NIST 3.4.5",    "K8S-PV-002": "NIST 3.4.5",
+        "K8S-SA-002": "NIST 3.4.6",
+        # 3.5 — Host OS Risks
+        "K8S-NODE-001": "NIST 3.5.1",  "K8S-NODE-002": "NIST 3.5.1",
+        "K8S-NODE-003": "NIST 3.5.2",  "K8S-NODE-004": "NIST 3.5.2",
+        "K8S-NODE-005": "NIST 3.5.3",  "K8S-NODE-006": "NIST 3.5.3",
+    }
+
     def __init__(self, kubeconfig=None, context=None, namespaces=None,
                  all_namespaces=True, verbose=False):
         self.findings: list = []
@@ -283,6 +511,54 @@ class KSPMScanner:
     def _cis(self, rule_id):
         """Return CIS reference for a rule_id or empty string."""
         return self.CIS_MAP.get(rule_id, "")
+
+    def _compliance_refs(self, rule_id):
+        """Return dict of framework → reference for a rule_id."""
+        refs = {}
+        cis = self.CIS_MAP.get(rule_id)
+        if cis:
+            refs["CIS"] = cis
+        nsa = self.NSA_CISA_MAP.get(rule_id)
+        if nsa:
+            refs["NSA/CISA"] = nsa
+        mitre = self.MITRE_MAP.get(rule_id)
+        if mitre:
+            refs["MITRE"] = mitre
+        soc2 = self.SOC2_MAP.get(rule_id)
+        if soc2:
+            refs["SOC 2"] = soc2
+        pci = self.PCIDSS_MAP.get(rule_id)
+        if pci:
+            refs["PCI-DSS"] = pci
+        nist = self.NIST_800_190_MAP.get(rule_id)
+        if nist:
+            refs["NIST 800-190"] = nist
+        return refs
+
+    def compliance_summary(self):
+        """Return per-framework pass/coverage stats based on current findings."""
+        frameworks = {
+            "CIS Kubernetes Benchmark": self.CIS_MAP,
+            "NSA/CISA Hardening Guide": self.NSA_CISA_MAP,
+            "MITRE ATT&CK Containers": self.MITRE_MAP,
+            "SOC 2 Trust Services": self.SOC2_MAP,
+            "PCI-DSS v4.0": self.PCIDSS_MAP,
+            "NIST SP 800-190": self.NIST_800_190_MAP,
+        }
+        triggered_ids = {f.rule_id for f in self.findings}
+        result = {}
+        for name, mapping in frameworks.items():
+            mapped_rules = set(mapping.keys())
+            triggered = mapped_rules & triggered_ids
+            result[name] = {
+                "total_controls": len(mapped_rules),
+                "findings_triggered": len(triggered),
+                "rules_clean": len(mapped_rules) - len(triggered),
+                "coverage_pct": round(
+                    len(triggered) / len(mapped_rules) * 100, 1
+                ) if mapped_rules else 0,
+            }
+        return result
 
     # -----------------------------------------------------------------------
     # Main scan entry
@@ -2537,26 +2813,50 @@ class KSPMScanner:
 
         for f in sorted_findings:
             c = self.SEVERITY_COLOR.get(f.severity, "")
-            cis = self._cis(f.rule_id)
-            cis_str = f"  CIS      : {cis}\n" if cis else ""
+            refs = self._compliance_refs(f.rule_id)
+            refs_str = ""
+            if refs:
+                tags = ", ".join(f"{k}: {v}" for k, v in refs.items())
+                refs_str = f"  Compliance: {tags}\n"
             cwe_str = f"  CWE      : {f.cwe}\n" if f.cwe else ""
             print(f"{c}{B}[{f.severity}]{R}  {f.rule_id}  {f.name}")
             print(f"  Resource : {f.file_path}")
             print(f"  Detail   : {f.line_content}")
-            print(f"{cis_str}{cwe_str}"
+            print(f"{refs_str}{cwe_str}"
                   f"  Issue    : {f.description}\n"
                   f"  Fix      : {f.recommendation}\n")
 
         counts = self.summary()
         print(f"{B}{'=' * 76}{R}")
-        print(f"{B}  SUMMARY{R}")
+        print(f"{B}  SEVERITY SUMMARY{R}")
         print("=" * 76)
         for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
             c = self.SEVERITY_COLOR.get(sev, "")
             print(f"  {c}{sev:<10}{R}  {counts.get(sev, 0)}")
         print("=" * 76)
 
+        # Compliance framework summary
+        comp = self.compliance_summary()
+        print(f"\n{B}{'=' * 76}{R}")
+        print(f"{B}  COMPLIANCE FRAMEWORK COVERAGE{R}")
+        print("=" * 76)
+        print(f"  {'Framework':<30} {'Controls':<10} {'Findings':<10} {'Clean':<8} {'Coverage'}")
+        print(f"  {'-' * 72}")
+        for name, stats in comp.items():
+            print(f"  {name:<30} {stats['total_controls']:<10} "
+                  f"{stats['findings_triggered']:<10} {stats['rules_clean']:<8} "
+                  f"{stats['coverage_pct']}%")
+        print("=" * 76)
+
     def save_json(self, path: str):
+        findings_with_compliance = []
+        for f in self.findings:
+            fd = f.to_dict()
+            refs = self._compliance_refs(f.rule_id)
+            if refs:
+                fd["compliance"] = refs
+            findings_with_compliance.append(fd)
+
         report = {
             "scanner": "kspm_scanner",
             "version": VERSION,
@@ -2564,7 +2864,8 @@ class KSPMScanner:
             "cluster": self.cluster_name,
             "findings_count": len(self.findings),
             "summary": self.summary(),
-            "findings": [f.to_dict() for f in self.findings],
+            "compliance_summary": self.compliance_summary(),
+            "findings": findings_with_compliance,
         }
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2)
@@ -2607,21 +2908,60 @@ class KSPMScanner:
         categories = sorted({f.category for f in self.findings})
         cat_options = "".join(f'<option>{esc(c)}</option>' for c in categories)
 
+        # Compliance dashboard cards
+        comp = self.compliance_summary()
+        comp_cards = ""
+        fw_colors = {
+            "CIS Kubernetes Benchmark": "#326ce5",
+            "NSA/CISA Hardening Guide": "#2ecc71",
+            "MITRE ATT&CK Containers": "#e74c3c",
+            "SOC 2 Trust Services": "#9b59b6",
+            "PCI-DSS v4.0": "#f39c12",
+            "NIST SP 800-190": "#1abc9c",
+        }
+        for name, stats in comp.items():
+            clr = fw_colors.get(name, "#89b4fa")
+            pct = stats["coverage_pct"]
+            bar_w = min(pct, 100)
+            comp_cards += (
+                f'<div style="background:#1e1e2e;border:1px solid #313244;border-radius:10px;'
+                f'padding:16px 20px;min-width:220px;flex:1">'
+                f'<div style="font-weight:700;color:{clr};font-size:0.95em;margin-bottom:8px">'
+                f'{esc(name)}</div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:0.85em;'
+                f'color:#a6adc8;margin-bottom:4px">'
+                f'<span>Controls: {stats["total_controls"]}</span>'
+                f'<span>Findings: {stats["findings_triggered"]}</span></div>'
+                f'<div style="background:#313244;border-radius:6px;height:8px;overflow:hidden;'
+                f'margin-bottom:6px">'
+                f'<div style="background:{clr};height:100%;width:{bar_w}%;border-radius:6px"></div></div>'
+                f'<div style="text-align:right;font-size:0.8em;color:#585b70">'
+                f'{pct}% rules triggered</div></div>'
+            )
+
         # Table rows
         rows = ""
         for i, f in enumerate(sorted_findings):
             bg = "#1e1e2e" if i % 2 == 0 else "#252535"
             rb = row_border.get(f.severity, "")
             sb = sev_badge.get(f.severity, "")
-            cis = self._cis(f.rule_id)
-            cis_html = f' <span style="color:#89b4fa;font-size:0.85em">[{esc(cis)}]</span>' if cis else ""
+            refs = self._compliance_refs(f.rule_id)
+            ref_tags = ""
+            if refs:
+                for fw, ref in refs.items():
+                    ref_tags += (f' <span style="background:#313244;color:#89b4fa;'
+                                 f'padding:1px 6px;border-radius:4px;font-size:0.78em;'
+                                 f'margin-left:3px">{esc(fw)}: {esc(ref)}</span>')
+            comp_line = (f'<div style="margin-top:4px">{ref_tags}</div>'
+                         if ref_tags else "")
             rows += (
                 f'<tr style="background:{bg};{rb}" '
                 f'data-severity="{esc(f.severity)}" data-category="{esc(f.category)}">'
                 f'<td style="padding:10px 14px;text-align:center">'
                 f'<span style="{sb};padding:3px 10px;border-radius:8px;font-weight:bold;'
                 f'font-size:0.85em">{esc(f.severity)}</span></td>'
-                f'<td style="padding:10px 8px;color:#f9e2af;font-family:monospace">{esc(f.rule_id)}{cis_html}</td>'
+                f'<td style="padding:10px 8px;color:#f9e2af;font-family:monospace">'
+                f'{esc(f.rule_id)}</td>'
                 f'<td style="padding:10px 8px">{esc(f.category)}</td>'
                 f'<td style="padding:10px 8px;font-weight:600">{esc(f.name)}</td>'
                 f'<td style="padding:10px 8px;font-family:monospace;font-size:0.9em;'
@@ -2639,6 +2979,7 @@ class KSPMScanner:
                 f'border-bottom:1px solid #313244">'
                 f'<div style="color:#cdd6f4"><b>Issue:</b> {esc(f.description)}</div>'
                 f'<div style="color:#a6e3a1;margin-top:3px"><b>Fix:</b> {esc(f.recommendation)}</div>'
+                f'{comp_line}'
                 f'</td></tr>'
             )
 
@@ -2680,6 +3021,13 @@ tr:hover td{{filter:brightness(1.15)}}
 <div class="chips">
 <label>Severity:</label>
 {chips}
+</div>
+<div style="padding:20px 36px;background:#181825">
+<div style="font-weight:700;color:#89b4fa;font-size:1.05em;margin-bottom:14px">
+Compliance Framework Coverage</div>
+<div style="display:flex;flex-wrap:wrap;gap:14px">
+{comp_cards}
+</div>
 </div>
 <div class="filters">
 <label>Filter:</label>

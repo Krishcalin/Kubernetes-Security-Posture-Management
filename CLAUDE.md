@@ -4,7 +4,7 @@
 
 - **Repository**: `Kubernetes-Security-Posture-Management`
 - **Scanner file**: `kspm_scanner.py`
-- **Version**: 1.1.0
+- **Version**: 1.2.0
 - **Language**: Python 3.8+
 - **Dependency**: `kubernetes` (Python client for Kubernetes API)
 - **Type**: Agentless live-cluster scanner — queries the Kubernetes API via kubeconfig or in-cluster config
@@ -41,7 +41,7 @@ Finding class  →  KSPMScanner class  →  CLI (argparse)
 1. **Agentless**: No pods/DaemonSets deployed to the cluster. Uses `kubernetes` Python client library to query the API server.
 2. **Workload-centric**: Scans workload controllers (Deployments, StatefulSets, DaemonSets, Jobs, CronJobs) rather than raw Pods, since controllers are the source of truth.
 3. **Finding.file_path repurposed**: For this scanner, `file_path` holds the resource path (`namespace/Kind/name`) and `line_content` holds the config detail string.
-4. **CIS_MAP**: A class-level dict maps rule IDs → CIS Kubernetes Benchmark section numbers. Displayed in both console and HTML output.
+4. **Compliance Framework Maps**: Six class-level dicts map rule IDs to framework controls: `CIS_MAP` (CIS Benchmark), `NSA_CISA_MAP` (NSA/CISA Hardening Guide v1.2), `MITRE_MAP` (ATT&CK for Containers), `SOC2_MAP` (Trust Service Criteria), `PCIDSS_MAP` (PCI-DSS v4.0), `NIST_800_190_MAP` (NIST SP 800-190). `_compliance_refs()` returns all framework refs for a rule; `compliance_summary()` computes per-framework coverage stats.
 5. **Managed cluster awareness**: API server pod inspection is wrapped in try/except — on EKS/GKE/AKS where kube-apiserver isn't a visible pod, the scanner falls back to informational findings.
 6. **System namespace filtering**: `SYSTEM_NAMESPACES` set (`kube-system`, `kube-public`, `kube-node-lease`, `default`) is used to skip noisy findings on system components and flag workloads in `default`.
 
@@ -135,12 +135,15 @@ python kspm_scanner.py --context kind-kind
 - [x] **Runtime classes** (K8S-RC-001): Non-existent RuntimeClass references, sandboxed runtime detection
 - [x] **Ephemeral containers** (K8S-EPH-001 to 002): Active debug containers, privileged ephemeral containers
 
-### v1.2.0 — Compliance Frameworks
-- [ ] **NSA/CISA Kubernetes Hardening Guide** mapping (separate from CIS)
-- [ ] **MITRE ATT&CK for Containers** mapping (T1610, T1611, T1613, etc.)
-- [ ] **SOC 2 / PCI-DSS** control mapping
-- [ ] **NIST 800-190** (Container Security Guide) mapping
-- [ ] **Compliance summary section** in HTML report with pass/fail per framework
+### v1.2.0 — Compliance Frameworks (COMPLETE)
+- [x] **NSA/CISA Kubernetes Hardening Guide** mapping (70+ rules → NSA sections 1-5)
+- [x] **MITRE ATT&CK for Containers** mapping (45+ rules → T1190, T1609, T1611, T1613, etc.)
+- [x] **SOC 2 Trust Service Criteria** mapping (65+ rules → CC6, CC7, CC8, A1)
+- [x] **PCI-DSS v4.0** control mapping (45+ rules → Req 1-11)
+- [x] **NIST SP 800-190** (Container Security Guide) mapping (45+ rules → Sections 3.1-3.5)
+- [x] **Compliance dashboard** in HTML report with per-framework coverage cards and progress bars
+- [x] **Per-finding compliance tags** in console, JSON, and HTML output
+- [x] **`compliance_summary()`** method and `compliance_summary` in JSON output
 
 ### v1.3.0 — Advanced RBAC Analysis (KIEM-style)
 - [ ] **RBAC graph analysis**: Map SA → RoleBinding → Role → permissions
